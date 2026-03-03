@@ -1,0 +1,12 @@
+﻿__pycache__/
+*.pyc
+.venv/
+.env
+.env.*
+.poetry-cache/
+.pytest_cache/
+*.log
+.idea/
+.vscode/
+.DS_Store
+.env.example
