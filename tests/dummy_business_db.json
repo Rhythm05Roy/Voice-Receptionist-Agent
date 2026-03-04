@@ -1,0 +1,178 @@
+{
+  "agents": {
+    "default": {
+      "agent_id": "local-agent",
+      "business_name": "Bahrain HomeCare Group",
+      "greeting": "Hello, this is Bahrain HomeCare Group. How can I help you today?",
+      "language": "en",
+      "coverage_country": "Bahrain",
+      "coverage_areas": [
+        "Manama",
+        "Riffa",
+        "Muharraq",
+        "Isa Town",
+        "Hamad Town",
+        "A'ali",
+        "Saar",
+        "Seef",
+        "Juffair"
+      ],
+      "fallback_phone": "+97317000000",
+      "intake_questions": [
+        "What service are you looking for?",
+        "Where are you located?",
+        "When is the best time for a visit?"
+      ],
+      "booking_required_fields": [
+        "service_type",
+        "location",
+        "preferred_time",
+        "contact_number"
+      ],
+      "service_catalog": [
+        {
+          "service_id": "ac_repair",
+          "name": "AC Repair and Maintenance",
+          "description": "Diagnosis, refrigerant check, filter cleaning, and cooling optimization.",
+          "base_price_bhd": "10-35 BHD",
+          "price_note": "Final cost depends on spare parts and compressor condition.",
+          "keywords": [
+            "ac",
+            "air conditioner",
+            "cooling",
+            "hvac",
+            "split unit",
+            "ac repair"
+          ]
+        },
+        {
+          "service_id": "deep_cleaning",
+          "name": "Home Deep Cleaning",
+          "description": "Kitchen, bathroom, floors, glass, and optional sanitization package.",
+          "base_price_bhd": "12-45 BHD",
+          "price_note": "Price varies by home size, number of rooms, and add-ons.",
+          "keywords": [
+            "cleaning",
+            "deep clean",
+            "house cleaning",
+            "sanitize",
+            "maid",
+            "home cleaning"
+          ]
+        },
+        {
+          "service_id": "salon_home",
+          "name": "At-Home Salon",
+          "description": "Haircut, beard trim, and basic grooming at customer location.",
+          "base_price_bhd": "8-25 BHD",
+          "price_note": "Premium stylist and late-night slots cost extra.",
+          "keywords": [
+            "salon",
+            "haircut",
+            "beard",
+            "grooming",
+            "stylist"
+          ]
+        },
+        {
+          "service_id": "general_maintenance",
+          "name": "General Maintenance",
+          "description": "Minor electrical, plumbing, and fixture fixes.",
+          "base_price_bhd": "9-30 BHD",
+          "price_note": "Materials are billed separately when needed.",
+          "keywords": [
+            "maintenance",
+            "plumbing",
+            "electric",
+            "fix",
+            "repair"
+          ]
+        }
+      ],
+      "faqs": {
+        "pricing": "Pricing depends on service type, location, urgency, and spare parts.",
+        "availability": "Same-day slots may be available depending on technician schedule.",
+        "payment": "Cash, card, and BenefitPay are supported.",
+        "supported_services": "Supported services are AC repair, deep cleaning, at-home salon, and general maintenance.",
+        "coverage": "Service coverage is Bahrain only for this local dummy setup."
+      },
+      "notes": [
+        "Dummy database for local development only.",
+        "No real booking is created outside this service."
+      ]
+    },
+    "premium": {
+      "agent_id": "premium",
+      "business_name": "Pearl Elite Home Services",
+      "greeting": "Welcome to Pearl Elite Home Services. How may I assist you today?",
+      "language": "en",
+      "coverage_country": "Bahrain",
+      "coverage_areas": [
+        "Manama",
+        "Seef",
+        "Saar",
+        "Busaiteen"
+      ],
+      "fallback_phone": "+97317111111",
+      "intake_questions": [
+        "Which premium service do you need?",
+        "Which area should we visit?",
+        "What date and time do you prefer?"
+      ],
+      "booking_required_fields": [
+        "service_type",
+        "location",
+        "preferred_time",
+        "customer_name",
+        "contact_number"
+      ],
+      "service_catalog": [
+        {
+          "service_id": "premium_cleaning",
+          "name": "Premium Home Cleaning",
+          "description": "Senior cleaning team with eco-safe supplies.",
+          "base_price_bhd": "25-70 BHD",
+          "price_note": "Depends on villa/apartment size and urgency.",
+          "keywords": [
+            "premium cleaning",
+            "vip cleaning",
+            "cleaning"
+          ]
+        }
+      ],
+      "faqs": {
+        "coverage": "Premium service is available in selected Bahrain areas only.",
+        "payment": "Online card and bank transfer are accepted."
+      },
+      "notes": [
+        "Dummy premium agent for multi-business simulation."
+      ]
+    }
+  },
+  "bookings": {
+    "DUMMY-10001": {
+      "status": "scheduled",
+      "booking_ref": "DUMMY-10001",
+      "message": "Your AC technician is scheduled for today between 6:00 PM and 7:00 PM.",
+      "service_name": "AC Repair and Maintenance",
+      "location": "Manama",
+      "preferred_time": "6:00 PM"
+    },
+    "DUMMY-10002": {
+      "status": "in_progress",
+      "booking_ref": "DUMMY-10002",
+      "message": "Your cleaning team is on the way and expected in 30 minutes.",
+      "service_name": "Home Deep Cleaning",
+      "location": "Riffa",
+      "preferred_time": "4:30 PM"
+    },
+    "DUMMY-10003": {
+      "status": "completed",
+      "booking_ref": "DUMMY-10003",
+      "message": "This booking was completed successfully yesterday.",
+      "service_name": "General Maintenance",
+      "location": "Muharraq",
+      "preferred_time": "11:00 AM"
+    }
+  }
+}

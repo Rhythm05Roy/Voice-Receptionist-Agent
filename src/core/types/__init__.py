@@ -1,3 +1,3 @@
-﻿from .schemas import AgentConfig, IntakeQuestion, TTSResult
+﻿from .schemas import AgentConfig, IntakeQuestion, ServiceInfo, TTSResult
 
-__all__ = ["AgentConfig", "IntakeQuestion", "TTSResult"]
+__all__ = ["AgentConfig", "IntakeQuestion", "ServiceInfo", "TTSResult"]

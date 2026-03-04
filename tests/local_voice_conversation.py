@@ -30,7 +30,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--from-number", default="+10000000000")
     parser.add_argument("--to-number", default="+20000000000")
     parser.add_argument("--call-id", default=None, help="Optional call ID. Auto-generated when omitted.")
-    parser.add_argument("--record-seconds", type=float, default=4.0)
+    parser.add_argument("--record-seconds", type=float, default=6.0)
     parser.add_argument("--input-rate", type=int, default=16000)
     parser.add_argument("--output-rate", type=int, default=24000)
     return parser.parse_args()
@@ -149,6 +149,7 @@ def main() -> int:
     print("Starting local voice conversation")
     print(f"call_id: {call_id}")
     print("Say 'exit' or 'quit' to stop")
+    print(f"record window: {args.record_seconds:.1f}s (use --record-seconds to change)")
     print("-" * 60)
 
     try:
@@ -179,6 +180,9 @@ def main() -> int:
         try:
             wav_bytes = _record_wav_bytes(seconds=args.record_seconds, sample_rate=args.input_rate)
             user_text = _transcribe(openai_client, wav_bytes)
+        except KeyboardInterrupt:
+            print("\nstopped by user")
+            return 0
         except Exception as exc:  # noqa: BLE001
             print(f"Voice input failed: {exc}")
             continue
@@ -201,6 +205,9 @@ def main() -> int:
                 call_id=call_id,
                 speech_text=user_text,
             )
+        except KeyboardInterrupt:
+            print("\nstopped by user")
+            return 0
         except Exception as exc:  # noqa: BLE001
             print(f"Webhook turn failed: {exc}")
             return 1
