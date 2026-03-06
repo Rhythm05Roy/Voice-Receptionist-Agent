@@ -38,5 +38,14 @@ class TelephonyWebhookRequest(BaseModel):
         return self.speech.best_text if self.speech else None
 
 
+class TelephonyEventRequest(BaseModel):
+    uuid: str
+    status: str | None = None
+    conversation_uuid: str | None = None
+    duration: int | None = None
+
+    model_config = {"populate_by_name": True, "extra": "ignore"}
+
+
 class TelephonyResponse(BaseModel):
     ncco: list[dict[str, Any]]

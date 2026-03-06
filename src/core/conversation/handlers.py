@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import difflib
 import re
@@ -8,7 +8,7 @@ from loguru import logger
 
 from src.core.services.backend_client import BackendClient
 from src.core.services.openai import OpenAIClient
-from src.core.types import AgentConfig
+from src.core.types import AgentConfig, IntakeQuestion
 
 from . import prompts
 
@@ -20,10 +20,14 @@ def _contains_arabic(text: str) -> bool:
     return any("\u0600" <= ch <= "\u06FF" for ch in text)
 
 
-def _detect_language(text: str, fallback: str = "en") -> str:
-    if not text.strip():
-        return fallback
-    return "ar" if _contains_arabic(text) else "en"
+def _localize(language: str, en_text: str, ar_text: str) -> str:
+    return ar_text if language == "ar" else en_text
+
+
+def _normalize(text: str) -> str:
+    lowered = text.lower()
+    lowered = re.sub(r"[^a-z0-9\s]+", " ", lowered)
+    return re.sub(r"\s+", " ", lowered).strip()
 
 
 def _cancel_terms() -> tuple[str, ...]:
@@ -31,154 +35,31 @@ def _cancel_terms() -> tuple[str, ...]:
         "cancel",
         "stop",
         "not interested",
+        "end call",
+        "hang up",
         "later",
-        "\u0645\u0634\u063a\u0648\u0644",
-        "\u0627\u0644\u063a\u0627\u0621",
-        "\u0625\u0644\u063a\u0627\u0621",
-        "\u0648\u0642\u0641",
-        "\u0633\u0643\u0631",
     )
 
 
 def _is_unknown(text: str) -> bool:
     lowered = text.strip().lower()
-    return lowered in {
-        "i don't know",
-        "idk",
-        "not sure",
-        "\u0645\u0627 \u0627\u062f\u0631\u064a",
-        "\u0645\u062f\u0631\u064a",
-    }
+    return lowered in {"i don't know", "idk", "not sure", "no idea", "unknown"}
 
 
-def _language_hint(text: str) -> str:
-    return "ar" if _contains_arabic(text) else "en"
-
-
-def _localize(language: str, en_text: str, ar_text: str) -> str:
-    return ar_text if language == "ar" else en_text
-
-
-def _is_out_of_coverage(answer: str) -> bool:
-    lowered = answer.lower()
-    in_bahrain_terms = {
-        "bahrain",
-        "bahrian",
-        "barain",
-        "baran",
-        "bahran",
-        "bahrein",
-        "bh",
-        "\u0627\u0644\u0628\u062d\u0631\u064a\u0646",
-        "\u0627\u0644\u0645\u0646\u0627\u0645\u0629",
-        "manama",
-        "muharraq",
-        "riffa",
-        "hamad",
-    }
-    if any(term in lowered for term in in_bahrain_terms):
-        return False
-
-    likely_foreign = {
-        "bangladesh",
-        "dhaka",
-        "india",
-        "pakistan",
-        "saudi",
-        "ksa",
-        "qatar",
-        "uae",
-        "oman",
-        "kuwait",
-        "egypt",
-        "canada",
-        "uk",
-        "usa",
-    }
-    return any(term in lowered for term in likely_foreign)
-
-
-def _is_business_info_query(text: str) -> bool:
-    lowered = text.lower()
-    triggers = [
-        "know about your",
-        "about your",
-        "what kind of business",
-        "about your business",
-        "about your company",
-        "what services",
-        "which services",
-        "services you provide",
-        "do you provide",
-        "service details",
-    ]
-    return any(t in lowered for t in triggers)
-
-
-def _is_pricing_query(text: str) -> bool:
-    lowered = text.lower()
-    return any(k in lowered for k in ["price", "pricing", "cost", "charge", "rate", "quotation", "quote"])
-
-
-def _is_booking_support_query(text: str) -> bool:
-    lowered = text.lower()
-    triggers = [
-        "previously booked",
-        "previous booking",
-        "previously i have booked",
-        "i have booked",
-        "i booked",
-        "already booked",
-        "booking status",
-        "status of booking",
-        "reschedule",
-        "cancel booking",
-        "update booking",
-        "my booking",
-    ]
-    if any(t in lowered for t in triggers):
-        return True
-    has_booking_word = "book" in lowered
-    has_support_intent = any(t in lowered for t in ["previous", "status", "reschedule", "cancel", "update"])
-    return has_booking_word and has_support_intent
-
-
-def _service_catalog_summary(agent: AgentConfig) -> str:
-    if not agent.service_catalog:
-        return "AC repair, home cleaning, salon at home, and general maintenance"
-    return ", ".join(service.name for service in agent.service_catalog)
-
-
-def _service_price_summary(agent: AgentConfig) -> str:
-    if not agent.service_catalog:
-        return "Pricing depends on service type and location."
-    chunks = [f"{service.name}: {service.base_price_bhd}" for service in agent.service_catalog[:4]]
-    return " | ".join(chunks)
-
-
-def _normalized_tokens(text: str) -> str:
-    lowered = text.lower()
-    lowered = re.sub(r"[^a-z0-9\s]+", " ", lowered)
-    return re.sub(r"\s+", " ", lowered).strip()
-
-
-def _match_service(candidate: str, agent: AgentConfig) -> str | None:
+def _match_service_name(candidate: str, agent: AgentConfig) -> str | None:
     lowered = candidate.lower()
     for service in agent.service_catalog:
-        tokens = [service.name, service.service_id, *service.keywords]
-        if any(token.lower() in lowered for token in tokens if token):
+        labels = [service.name, service.service_id, *service.keywords]
+        if any(label.lower() in lowered for label in labels if label):
             return service.name
 
-    candidate_norm = _normalized_tokens(candidate)
-    if not candidate_norm:
-        return None
-
+    candidate_norm = _normalize(candidate)
     best_name: str | None = None
     best_score = 0.0
     for service in agent.service_catalog:
         labels = [service.name, service.service_id, *service.keywords]
         for label in labels:
-            label_norm = _normalized_tokens(label)
+            label_norm = _normalize(label)
             if not label_norm:
                 continue
             score = difflib.SequenceMatcher(None, candidate_norm, label_norm).ratio()
@@ -191,252 +72,334 @@ def _match_service(candidate: str, agent: AgentConfig) -> str | None:
     return None
 
 
+def _is_out_of_coverage(answer: str, agent: AgentConfig) -> bool:
+    normalized = answer.strip().lower()
+    if not normalized:
+        return False
+
+    if agent.coverage_country and agent.coverage_country.lower() in normalized:
+        return False
+
+    for area in agent.coverage_areas:
+        if area.lower() in normalized:
+            return False
+
+    foreign_markers = {
+        "bangladesh",
+        "dhaka",
+        "india",
+        "pakistan",
+        "usa",
+        "uk",
+        "canada",
+        "qatar",
+        "uae",
+        "oman",
+        "kuwait",
+        "saudi",
+    }
+    return any(marker in normalized for marker in foreign_markers)
+
+
+def _to_bool_answer(text: str) -> str | None:
+    normalized = text.strip().lower()
+    compact = re.sub(r"[^a-z0-9\s]+", " ", normalized)
+    compact = re.sub(r"\s+", " ", compact).strip()
+
+    yes_terms = (
+        "yes",
+        "yeah",
+        "yep",
+        "true",
+        "sure",
+        "affirmative",
+        "i have",
+        "have allergy",
+        "allergy yes",
+    )
+    no_terms = (
+        "no",
+        "nope",
+        "false",
+        "negative",
+        "do not",
+        "don't",
+        "dont",
+        "no allergy",
+    )
+
+    if compact in {"y", "yes"}:
+        return "yes"
+    if compact in {"n", "no"}:
+        return "no"
+
+    if any(term in compact for term in no_terms):
+        return "no"
+    if any(term in compact for term in yes_terms):
+        return "yes"
+
+    # Handle short transcribed variations like "yas", "ya", "yess".
+    if re.fullmatch(r"y(e|a)?s+", compact):
+        return "yes"
+    if re.fullmatch(r"n+o+", compact):
+        return "no"
+
+    return None
+
+
+def _active_intake_questions(session: CallSession) -> list[IntakeQuestion]:
+    questions = session.agent_config.intake_questions
+    if not questions:
+        return []
+
+    selected_service = (session.selected_service or "").strip().lower()
+    active: list[IntakeQuestion] = []
+    for question in questions:
+        if question.ask_when == "all_bookings":
+            active.append(question)
+            continue
+        if not selected_service:
+            continue
+        service_tags = [tag.lower() for tag in question.service_tags]
+        if any(tag in selected_service for tag in service_tags):
+            active.append(question)
+    return active
+
+
+def _format_reask(question: IntakeQuestion, language: str) -> str:
+    if question.retry_prompt:
+        return question.retry_prompt
+    return _localize(
+        language,
+        f"Sorry, I still need this to continue: {question.question}",
+        f"Sorry, I still need this to continue: {question.question}",
+    )
+
+
 def build_system_messages(agent: AgentConfig, caller_language: str | None = None) -> list[dict[str, str]]:
-    language_hint = caller_language or agent.language or "en"
+    hint = (caller_language or agent.default_greeting_language or agent.language or "en").lower()
+    if hint not in set(agent.supported_languages):
+        hint = agent.default_greeting_language or "en"
     language_rule = (
-        "Reply fully in Arabic unless caller asks for English."
-        if language_hint == "ar"
-        else "Reply fully in English unless caller asks for Arabic."
+        "Continue in Arabic only if caller explicitly uses Arabic."
+        if hint == "ar"
+        else "Continue in English unless caller requests another supported language."
     )
     return [
-        {"role": "system", "content": f"{prompts.SYSTEM_PROMPT}\n\nLanguage rule: {language_rule}"},
+        {"role": "system", "content": f"{prompts.SYSTEM_PROMPT}\n\nLanguage policy: {language_rule}"},
         {"role": "assistant", "content": agent.greeting or prompts.GREETING_TEMPLATE},
     ]
 
 
-async def _analyze_turn(
-    llm_client: OpenAIClient,
-    question: str,
+def _render_question_prompt(question: IntakeQuestion) -> str:
+    base = question.question.strip()
+    if question.answer_type == "yes_no":
+        return f"{base} Please answer yes or no."
+    if question.answer_type == "multiple_choice" and question.options:
+        return f"{base} Options are: {', '.join(question.options)}."
+    return base
+
+
+async def _natural_ask(llm_client: OpenAIClient, question: IntakeQuestion, language: str) -> str:
+    # Deterministic rendering keeps style stable and avoids one extra LLM hop per turn.
+    _ = llm_client
+    _ = language
+    return _render_question_prompt(question)
+
+
+async def _validate_answer(
+    session: CallSession,
+    question: IntakeQuestion,
     user_input: str,
-    collected_answers: dict[str, str],
-) -> dict[str, Any]:
-    if hasattr(llm_client, "analyze_turn"):
+    llm_client: OpenAIClient,
+) -> tuple[bool, str, str | None]:
+    language = session.preferred_language or session.agent_config.default_greeting_language or "en"
+    clean = user_input.strip()
+
+    if question.answer_type == "yes_no":
+        normalized_bool = _to_bool_answer(clean)
+        if normalized_bool is None:
+            return False, "", _format_reask(question, language)
+        if normalized_bool == "yes":
+            # Preserve useful detail for booking notes while still matching yes/no logic.
+            return True, f"yes: {clean}", None
+        return True, "no", None
+
+    if question.answer_type == "multiple_choice":
+        if not question.options:
+            return bool(clean), clean, None
+        normalized_input = _normalize(clean)
+        for option in question.options:
+            if _normalize(option) in normalized_input:
+                return True, option, None
+        options_preview = ", ".join(question.options)
+        return False, "", f"Please choose one option: {options_preview}."
+
+    if question.answer_type == "number":
+        number_match = re.search(r"\d+(?:\.\d+)?", clean)
+        if number_match:
+            return True, number_match.group(0), None
+        return False, "", _format_reask(question, language)
+
+    if question.validation_regex:
         try:
-            result = await llm_client.analyze_turn(question, user_input, collected_answers)
-            if isinstance(result, dict):
-                logger.bind(question=question).debug("LLM intake routing result", intent=result.get("intent"))
-                return result
-        except Exception:  # noqa: BLE001
-            logger.exception("LLM analyze_turn failed; using heuristic fallback")
+            if not re.search(question.validation_regex, clean):
+                return False, "", _format_reask(question, language)
+        except re.error:
+            logger.warning("Invalid validation regex in intake question", key=question.key)
 
-    cleaned = user_input.strip()
-    if cleaned.lower() in {"cancel", "stop", "hang up"}:
-        return {"intent": "cancel", "extracted_answer": "", "assistant_reply": "Understood."}
-    if len(cleaned) < 3 or _is_unknown(cleaned):
-        return {
-            "intent": "unclear",
-            "extracted_answer": "",
-            "assistant_reply": "Could you answer that question more clearly?",
-        }
-    return {"intent": "answer", "extracted_answer": cleaned, "assistant_reply": ""}
+    if question.key in {"service", "service_type", "service_name"}:
+        matched = _match_service_name(clean, session.agent_config)
+        if not matched:
+            services = ", ".join(service.name for service in session.agent_config.service_catalog)
+            return False, "", f"We currently support: {services}. Which one do you need?"
+        session.selected_service = matched
+        return True, matched, None
 
+    if len(clean) < 2:
+        return False, "", _format_reask(question, language)
 
-async def _natural_ask(llm_client: OpenAIClient, question: str, language: str) -> str:
-    system = (
-        "You are a phone intake agent. Rephrase the given question naturally in one sentence. "
-        "Keep the exact meaning and keep it short."
+    analysis = await llm_client.analyze_turn(
+        question=question.question,
+        user_input=clean,
+        collected_answers=session.collected_answers,
+        question_meta=question.model_dump(),
     )
-    user = f"Language: {language}\nQuestion: {question}"
-    try:
-        text = await llm_client.generate_reply([
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ])
-        return (text or question).strip()
-    except Exception:  # noqa: BLE001
-        return question
+
+    intent = str(analysis.get("intent", "unclear"))
+    if intent == "cancel":
+        return False, "", _localize(
+            language,
+            "Understood. I can end the call now.",
+            "Understood. I can end the call now.",
+        )
+
+    if intent in {"info_request", "off_topic", "unclear"}:
+        assistant_reply = str(analysis.get("assistant_reply") or "").strip()
+        return False, "", assistant_reply or _format_reask(question, language)
+
+    normalized_answer = str(analysis.get("normalized_answer") or analysis.get("extracted_answer") or clean).strip()
+    return True, normalized_answer, None
 
 
-async def handle_intake(session: CallSession, user_input: str, llm_client: OpenAIClient) -> dict[str, str]:
-    language = session.preferred_language or session.agent_config.language or "en"
-    cleaned = user_input.strip()
-    if cleaned:
-        language = _detect_language(cleaned, fallback=language)
-        session.preferred_language = language
-
-    lowered = cleaned.lower()
-    if any(term in lowered for term in _cancel_terms()):
-        text = _localize(language, "No problem. I will end the call now. Thank you.", "No problem. I will end the call now. Thank you.")
-        return {"action": "disqualify", "text": text}
-
-    if session.current_state == "greeting":
-        session.awaiting_answer = True
-        if not cleaned:
-            question = session.next_question or prompts.INTAKE_FALLBACK
-            ask_text = await _natural_ask(llm_client, question, language)
-            return {"action": "next", "text": ask_text}
-        if _is_booking_support_query(cleaned):
-            return {
-                "action": "next",
-                "text": (
-                    "I can help with existing bookings too. In this local demo, share your booking reference or phone number, "
-                    "or tell me the new service you want."
-                ),
-            }
-        if _is_business_info_query(cleaned):
-            business_name = session.agent_config.business_name
-            services = _service_catalog_summary(session.agent_config)
-            coverage = session.agent_config.coverage_country or "Bahrain"
-            prices = _service_price_summary(session.agent_config)
-            question = session.next_question or "Which service do you need?"
-            return {
-                "action": "next",
-                "text": (
-                    f"We are {business_name}. We provide {services}. "
-                    f"Our current service coverage is {coverage}. "
-                    f"Typical price ranges: {prices}. "
-                    f"{question}"
-                ),
-            }
-        if _is_pricing_query(cleaned):
-            prices = _service_price_summary(session.agent_config)
-            question = session.next_question or "Which service do you need?"
-            return {
-                "action": "next",
-                "text": f"Typical price ranges are: {prices}. {question}",
-            }
-
-    if cleaned and not session.awaiting_answer and session.current_question_index == 0:
-        session.awaiting_answer = True
-
-    if session.awaiting_answer:
-        if _is_unknown(cleaned):
-            question = session.next_question or "Could you clarify?"
-            follow = await _natural_ask(llm_client, question, language)
-            return {"action": "next", "text": follow}
-
-        if len(cleaned) < 3:
-            retry_text = _localize(language, "Could you share a little more detail?", "Could you share a little more detail?")
-            return {"action": "next", "text": retry_text}
-
-        question = session.next_question or ""
-
-        if session.current_question_index == 0 and _is_business_info_query(cleaned):
-            business_name = session.agent_config.business_name
-            services = _service_catalog_summary(session.agent_config)
-            coverage = session.agent_config.coverage_country or "Bahrain"
-            prices = _service_price_summary(session.agent_config)
-            return {
-                "action": "next",
-                "text": (
-                    f"We are {business_name}. We provide {services}. "
-                    f"Our coverage is {coverage}. Typical price ranges are: {prices}. "
-                    "Tell me which service you want and I will book it for you."
-                ),
-            }
-
-        if session.current_question_index == 0 and _is_booking_support_query(cleaned):
-            return {
-                "action": "next",
-                "text": (
-                    "Understood. For previous booking support, share your booking reference or phone number. "
-                    "If you want a new booking now, tell me the service."
-                ),
-            }
-
-        if session.current_question_index == 0 and _is_pricing_query(cleaned):
-            prices = _service_price_summary(session.agent_config)
-            return {
-                "action": "next",
-                "text": f"Typical price ranges are: {prices}. Tell me which service you need and I can narrow the estimate.",
-            }
-
-        analysis = await _analyze_turn(llm_client, question, cleaned, session.collected_answers)
-        intent = str(analysis.get("intent") or "unclear")
-
-        if intent == "cancel":
-            text = _localize(language, "Understood. We can stop here. Thank you for your time.", "Understood. We can stop here. Thank you for your time.")
-            return {"action": "disqualify", "text": text}
-
-        if intent in {"info_request", "unclear"}:
-            assistant_reply = str(analysis.get("assistant_reply") or "").strip()
-            if session.current_question_index == 0 and _is_business_info_query(cleaned):
-                business_name = session.agent_config.business_name
-                services = _service_catalog_summary(session.agent_config)
-                coverage = session.agent_config.coverage_country or "Bahrain"
-                prices = _service_price_summary(session.agent_config)
-                assistant_reply = (
-                    f"We are {business_name}. We provide {services}. "
-                    f"Our coverage is {coverage}. Typical price ranges are: {prices}. "
-                    "Tell me which service you want and I will continue."
-                )
-            elif session.current_question_index == 0 and _is_pricing_query(cleaned):
-                prices = _service_price_summary(session.agent_config)
-                assistant_reply = f"Typical price ranges are: {prices}. Tell me which service you want and I can continue with booking."
-            elif session.current_question_index == 0 and _is_booking_support_query(cleaned):
-                assistant_reply = (
-                    "I can help with booking support too. Share booking reference or phone number, "
-                    "or tell me the new service you need."
-                )
-
-            if not assistant_reply:
-                assistant_reply = _localize(
-                    language,
-                    "I can help with that, and I still need this answer to continue.",
-                    "I can help with that, and I still need this answer to continue.",
-                )
-            reask = await _natural_ask(llm_client, question, language)
-            return {"action": "next", "text": f"{assistant_reply} {reask}".strip()}
-
-        candidate_answer = str(analysis.get("extracted_answer") or cleaned).strip()
-        if len(candidate_answer) < 2:
-            return {"action": "next", "text": "Could you answer that specific question?"}
-
-        normalized = candidate_answer
-
-        if session.current_question_index == 0 and session.agent_config.service_catalog:
-            matched_service = _match_service(normalized, session.agent_config)
-            if not matched_service:
-                session.service_prompt_retries += 1
-                supported = ", ".join(s.name for s in session.agent_config.service_catalog)
-                if session.service_prompt_retries >= 2:
-                    return {
-                        "action": "next",
-                        "text": "No rush. Tell me in simple words if you need new booking, pricing details, or help with existing booking.",
-                    }
+def _apply_disqualification(question: IntakeQuestion, answer: str) -> dict[str, str | None] | None:
+    normalized = answer.strip().lower()
+    for rule in question.disqualification_rules:
+        if rule.if_answer.strip().lower() in normalized:
+            if rule.action == "transfer":
                 return {
-                    "action": "next",
-                    "text": f"I can help with these services: {supported}. Which one do you need?",
+                    "action": "transfer",
+                    "text": rule.message_to_caller,
+                    "transfer_number": rule.transfer_number,
                 }
-            session.service_prompt_retries = 0
+            return {"action": "disqualify", "text": rule.message_to_caller, "transfer_number": None}
+    return None
 
-        question_lower = question.lower()
-        if any(
-            term in question_lower
-            for term in [
-                "where",
-                "area",
-                "location",
-                "\u0648\u064a\u0646",
-                "\u0627\u0644\u0645\u0646\u0637\u0642\u0629",
-                "\u0627\u0644\u0645\u0648\u0642\u0639",
-            ]
-        ):
-            if _is_out_of_coverage(normalized):
-                session.out_of_coverage = True
-                disq = _localize(
-                    language,
-                    "At the moment we only serve locations in Bahrain. I can still answer your questions and arrange a human follow-up if you want.",
-                    "At the moment we only serve locations in Bahrain. I can still answer your questions and arrange a human follow-up if you want.",
-                )
-                key = f"q{session.current_question_index}"
-                session.collected_answers[key] = normalized
-                session.current_question_index += 1
-                session.awaiting_answer = False
-                return {"action": "out_of_coverage", "text": disq}
 
-        key = f"q{session.current_question_index}"
-        session.collected_answers[key] = normalized
-        session.current_question_index += 1
-        session.awaiting_answer = False
+async def handle_intake(session: CallSession, user_input: str, llm_client: OpenAIClient) -> dict[str, str | None]:
+    language = session.preferred_language or session.agent_config.default_greeting_language or "en"
+    clean = user_input.strip()
 
-    if session.has_more_questions:
-        question = session.next_question or prompts.INTAKE_FALLBACK
+    if clean:
+        if _contains_arabic(clean) and "ar" in session.agent_config.supported_languages:
+            session.preferred_language = "ar"
+            language = "ar"
+        elif "english" in clean.lower() and "en" in session.agent_config.supported_languages:
+            session.preferred_language = "en"
+            language = "en"
+
+    lowered = clean.lower()
+    if any(term in lowered for term in _cancel_terms()):
+        return {
+            "action": "disqualify",
+            "text": _localize(language, "No problem. I will end the call now.", "No problem. I will end the call now."),
+            "transfer_number": None,
+        }
+
+    questions = _active_intake_questions(session)
+    if not questions:
+        return {"action": "complete", "text": "intake-complete", "transfer_number": None}
+
+    if session.current_question_index >= len(questions):
+        return {"action": "complete", "text": "intake-complete", "transfer_number": None}
+
+    current_question = questions[session.current_question_index]
+
+    if not session.awaiting_answer:
         session.awaiting_answer = True
-        ask_text = await _natural_ask(llm_client, question, language)
-        return {"action": "next", "text": ask_text}
+        if not clean:
+            ask_text = await _natural_ask(llm_client, current_question, language)
+            return {"action": "next", "text": ask_text, "transfer_number": None}
 
-    return {"action": "complete", "text": "intake-complete"}
+    if not clean:
+        ask_text = await _natural_ask(llm_client, current_question, language)
+        return {"action": "next", "text": ask_text, "transfer_number": None}
+
+    if _is_unknown(clean):
+        session.unknown_answer_retries += 1
+        if session.unknown_answer_retries >= 2 and session.agent_config.fallback_phone:
+            return {
+                "action": "transfer",
+                "text": "Let me connect you to a human agent for faster help.",
+                "transfer_number": session.agent_config.fallback_phone,
+            }
+        return {"action": "next", "text": _format_reask(current_question, language), "transfer_number": None}
+
+    is_valid, normalized_answer, feedback = await _validate_answer(session, current_question, clean, llm_client)
+    if not is_valid:
+        if feedback and "end the call" in feedback.lower():
+            return {"action": "disqualify", "text": feedback, "transfer_number": None}
+
+        if feedback:
+            # Side-question handling: answer quickly but keep intake moving.
+            if any(k in clean.lower() for k in ["service", "price", "pricing", "business"]):
+                return {
+                    "action": "info_then_reask",
+                    "text": feedback,
+                    "transfer_number": None,
+                }
+            return {"action": "next", "text": feedback, "transfer_number": None}
+        return {"action": "next", "text": _format_reask(current_question, language), "transfer_number": None}
+
+    if current_question.key in {"location", "area", "service_area"} and _is_out_of_coverage(normalized_answer, session.agent_config):
+        session.out_of_coverage = True
+        return {
+            "action": "out_of_coverage",
+            "text": (
+                f"At the moment we currently operate in {session.agent_config.coverage_country}. "
+                "I can still answer questions or connect you to a human agent."
+            ),
+            "transfer_number": session.agent_config.fallback_phone,
+        }
+
+    disqualification = _apply_disqualification(current_question, normalized_answer)
+    if disqualification:
+        return disqualification
+
+    session.collected_answers[current_question.key] = normalized_answer
+    session.collected_answers[f"q{session.current_question_index}"] = normalized_answer
+
+    # Keep frequently-used aliases for downstream booking payloads.
+    if current_question.key in {"service", "service_name", "service_type"}:
+        session.selected_service = normalized_answer
+        session.collected_answers["service_type"] = normalized_answer
+    elif current_question.key in {"location", "area", "service_area"}:
+        session.collected_answers["location"] = normalized_answer
+    elif current_question.key in {"preferred_time", "visit_time", "time", "schedule"}:
+        session.collected_answers["preferred_time"] = normalized_answer
+
+    session.current_question_index += 1
+    session.awaiting_answer = False
+    session.unknown_answer_retries = 0
+
+    questions = _active_intake_questions(session)
+    if session.current_question_index >= len(questions):
+        return {"action": "complete", "text": "intake-complete", "transfer_number": None}
+
+    next_question = questions[session.current_question_index]
+    session.awaiting_answer = True
+    ask_text = await _natural_ask(llm_client, next_question, language)
+    return {"action": "next", "text": ask_text, "transfer_number": None}
 
 
 async def handle_booking(
@@ -444,39 +407,52 @@ async def handle_booking(
     backend_client: BackendClient,
     llm_client: OpenAIClient,
 ) -> dict[str, str | None]:
+    _ = llm_client
     try:
         booking_response = await backend_client.book_service(
             agent_id=session.agent_config.agent_id,
             answers=session.collected_answers,
         )
-        confirmation = booking_response.get("message") or "Your request has been registered."
-        language_hint = _language_hint(" ".join(session.collected_answers.values()))
-        if hasattr(llm_client, "rewrite_confirmation"):
-            natural_confirmation = await llm_client.rewrite_confirmation(
-                str(confirmation), caller_language_hint=language_hint
-            )
-        else:
-            natural_confirmation = str(confirmation)
-        return {"action": "speak", "text_to_speak": natural_confirmation, "transfer_number": None}
+        status = str(booking_response.get("status") or "").lower()
+
+        if status == "unsupported_service":
+            session.current_state = "intake"
+            session.current_question_index = 0
+            session.awaiting_answer = False
+            return {
+                "action": "speak",
+                "text_to_speak": str(
+                    booking_response.get("message")
+                    or "I can help with available services. Which service would you like?"
+                ),
+                "transfer_number": None,
+            }
+
+        confirmation = str(booking_response.get("message") or "Your booking request has been recorded.")
+        booking_ref = (
+            booking_response.get("booking_ref")
+            or booking_response.get("booking_id")
+            or booking_response.get("id")
+        )
+        normalized_confirmation = confirmation
+        if booking_ref and str(booking_ref) not in confirmation:
+            normalized_confirmation = f"{confirmation} Your booking ID is {booking_ref}."
+
+        return {
+            "action": "speak",
+            "text_to_speak": normalized_confirmation,
+            "transfer_number": None,
+            "booking_ref": str(booking_ref) if booking_ref else None,
+        }
     except Exception:  # noqa: BLE001
         if session.agent_config.fallback_phone:
-            transfer_text = _localize(
-                session.preferred_language or session.agent_config.language or "en",
-                "I will transfer you to a human agent to complete your request.",
-                "I will transfer you to a human agent to complete your request.",
-            )
             return {
                 "action": "transfer",
-                "text_to_speak": transfer_text,
+                "text_to_speak": "I will transfer you to a human agent to complete this request.",
                 "transfer_number": session.agent_config.fallback_phone,
             }
-        fail_text = _localize(
-            session.preferred_language or session.agent_config.language or "en",
-            "A temporary error happened. Please call again shortly.",
-            "A temporary error happened. Please call again shortly.",
-        )
         return {
             "action": "hangup",
-            "text_to_speak": fail_text,
+            "text_to_speak": "A temporary issue happened while creating your booking. Please call again shortly.",
             "transfer_number": None,
         }

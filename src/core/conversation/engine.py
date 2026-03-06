@@ -1,8 +1,8 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import re
 import time
-from typing import Literal, Sequence
+from typing import Literal
 
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
@@ -14,9 +14,9 @@ from src.core.services.openai import OpenAIClient
 from src.core.types import AgentConfig
 
 from . import prompts
-from .handlers import build_system_messages, handle_booking, handle_intake
+from .handlers import handle_booking, handle_intake
 
-State = Literal["greeting", "intake", "booking", "assist", "transfer", "end"]
+State = Literal["greeting", "intent", "intake", "booking", "assist", "transfer", "end"]
 TaskIntent = Literal["undecided", "new_booking", "track_booking", "business_info"]
 
 
@@ -29,50 +29,59 @@ class CallSession(BaseModel):
     current_question_index: int = 0
     awaiting_answer: bool = False
     preferred_language: str | None = None
+    selected_service: str | None = None
+    last_booking_ref: str | None = None
+    last_booking_payload: dict[str, str | None] = Field(default_factory=dict)
+    last_intent: str | None = None
+    intent_confidence: str = "unknown"
+    post_booking_stage: str | None = None
+    unknown_answer_retries: int = 0
     out_of_coverage: bool = False
     booking_completed: bool = False
-    service_prompt_retries: int = 0
     created_at: float = Field(default_factory=time.monotonic)
+    last_activity: float = Field(default_factory=time.monotonic)
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    @property
-    def has_more_questions(self) -> bool:
-        return self.current_question_index < len(self.agent_config.intake_questions)
-
-    @property
-    def next_question(self) -> str | None:
-        if self.has_more_questions:
-            return self.agent_config.intake_questions[self.current_question_index]
-        return None
+    def touch(self) -> None:
+        self.last_activity = time.monotonic()
 
 
 class CallSessionManager:
-    """In-memory session store with TTL.
+    """In-memory session storage with TTL.
 
-    Session keys: f"call:{call_uuid}". TTL set to 30 minutes for MVP.
-    To swap to Redis later, replace the dict with `redis.asyncio.Redis` and
-    serialize CallSession using model_dump()/model_validate().
+    Session key format: f"call:{call_uuid}".
+
+    Redis migration sketch:
+      - Replace _store dict with redis.asyncio.Redis.
+      - On save: redis.setex(key, ttl, session.model_dump_json()).
+      - On get: payload = redis.get(key); CallSession.model_validate_json(payload).
+      - Use same key format for compatibility.
     """
 
     def __init__(self, ttl_seconds: int = 1800):
         self.ttl = ttl_seconds
         self._store: dict[str, CallSession] = {}
 
-    def _key(self, call_id: str) -> str:
+    @staticmethod
+    def _key(call_id: str) -> str:
         return f"call:{call_id}"
 
     def get(self, call_id: str) -> CallSession | None:
-        key = self._key(call_id)
-        session = self._store.get(key)
+        session = self._store.get(self._key(call_id))
         if not session:
             return None
-        if time.monotonic() - session.created_at > self.ttl:
+
+        now = time.monotonic()
+        if now - session.last_activity > self.ttl:
             self.delete(call_id)
             return None
+
+        session.touch()
         return session
 
     def save(self, session: CallSession) -> None:
+        session.touch()
         self._store[self._key(session.call_id)] = session
 
     def delete(self, call_id: str) -> None:
@@ -80,7 +89,11 @@ class CallSessionManager:
 
     def prune(self) -> None:
         now = time.monotonic()
-        expired = [k for k, s in self._store.items() if now - s.created_at > self.ttl]
+        expired = [
+            key
+            for key, session in self._store.items()
+            if now - session.last_activity > self.ttl
+        ]
         for key in expired:
             self._store.pop(key, None)
 
@@ -108,84 +121,202 @@ class ConversationEngine:
         normalized = re.sub(r"\s+", " ", text.lower()).strip()
         if not normalized:
             return False
-        keywords = [
+        keywords = {
             "bye",
             "goodbye",
             "thanks bye",
             "thank you bye",
-            "no thanks",
-            "that's all",
             "thats all",
-            "khuda hafiz",
-            "allah hafiz",
-            "ok bye",
-            "okay bye",
-            "bye bye",
-            "no no no bye",
-        ]
-        return any(k in normalized for k in keywords)
+            "that's all",
+            "no thanks",
+            "end call",
+            "hang up",
+        }
+        return any(token in normalized for token in keywords)
 
     @staticmethod
     def _extract_booking_id(text: str) -> str | None:
         if not text:
             return None
-        match = re.search(r"\b([A-Za-z]{2,}-\d{4,})\b", text)
-        return match.group(1) if match else None
 
-    @staticmethod
-    def _looks_like_pricing_question(text: str) -> bool:
-        normalized = text.lower()
-        return any(k in normalized for k in ["price", "pricing", "cost", "charge", "rate", "quotation", "quote"])
+        raw = text.strip()
+        upper = raw.upper()
 
-    @staticmethod
-    def _looks_like_service_question(text: str) -> bool:
-        normalized = text.lower()
-        return any(k in normalized for k in ["service", "services", "provide", "offer", "available"])
+        # Preferred ID format (e.g., DUMMY-10001).
+        match = re.search(r"\b([A-Z]{2,}-\d{3,})\b", upper)
+        if match:
+            return match.group(1)
 
-    @staticmethod
-    def _looks_like_booking_detail_question(text: str) -> bool:
-        normalized = text.lower()
-        return any(
-            k in normalized
-            for k in ["what details", "what information", "what else", "what do you need", "required", "require"]
-        )
+        # Spoken/numeric form: "my booking id is 12614".
+        numeric_context = re.search(r"(booking\s*(?:id|number|reference)[^0-9]*)([0-9][0-9,\s-]{2,})", upper)
+        if numeric_context:
+            digits = re.sub(r"\D", "", numeric_context.group(2))
+            if len(digits) >= 3:
+                return digits
+
+        # Fallback: any standalone 4+ digit token.
+        fallback = re.search(r"\b(\d{4,})\b", upper)
+        if fallback:
+            return fallback.group(1)
+
+        return None
 
     @staticmethod
     def _looks_like_tracking_request(text: str) -> bool:
-        normalized = text.lower()
-        return any(
-            k in normalized
-            for k in ["track", "booking status", "status", "booking id", "already booked", "previously booked", "my booking"]
+        lowered = (text or "").lower()
+        cues = (
+            "track",
+            "booking status",
+            "status of booking",
+            "booking id",
+            "reschedule",
+            "cancel booking",
+            "my booking",
+            "previous booking",
         )
+        return any(cue in lowered for cue in cues)
+
+    @staticmethod
+    def _looks_like_info_request(text: str) -> bool:
+        lowered = (text or "").lower()
+        cues = (
+            "service",
+            "services",
+            "what do you provide",
+            "what kind",
+            "business",
+            "company",
+            "pricing",
+            "price",
+            "cost",
+            "rate",
+            "offer",
+        )
+        return any(cue in lowered for cue in cues)
 
     @staticmethod
     def _looks_like_new_booking_request(text: str) -> bool:
-        normalized = text.lower()
-        return any(k in normalized for k in ["book", "appointment", "visit", "need service", "new booking"])
+        lowered = (text or "").lower()
+        if any(token in lowered for token in ("thank", "thanks", "shukran", "no need", "don't need", "dont need")):
+            return False
+        cues = (
+            "book",
+            "booking",
+            "appointment",
+            "need service",
+            "i need",
+            "visit",
+        )
+        return any(cue in lowered for cue in cues)
 
-    def _mentions_known_service(self, session: CallSession, text: str) -> bool:
-        normalized = text.lower()
-        for service in session.agent_config.service_catalog:
-            tokens = [service.name, service.service_id, *service.keywords]
-            if any(token.lower() in normalized for token in tokens if token):
-                return True
-        return False
+    @staticmethod
+    def _looks_like_gratitude(text: str) -> bool:
+        lowered = (text or "").lower()
+        return any(token in lowered for token in ("thank you", "thanks", "shukran", "much appreciated"))
+
+    @staticmethod
+    def _looks_like_no_more_help(text: str) -> bool:
+        lowered = (text or "").lower()
+        cues = (
+            "no more",
+            "nothing else",
+            "anything else",
+            "that's all",
+            "thats all",
+            "i don't need any other",
+            "i dont need any other",
+            "no i don't need",
+            "no i dont need",
+            "no need",
+            "all good",
+        )
+        return any(cue in lowered for cue in cues)
+
+    @staticmethod
+    def _looks_like_acknowledgement(text: str) -> bool:
+        lowered = (text or "").lower().strip()
+        compact = re.sub(r"[^a-z0-9\s]+", " ", lowered)
+        compact = re.sub(r"\s+", " ", compact).strip()
+        if compact in {"ok", "okay", "alright", "cool", "got it", "great", "sounds great"}:
+            return True
+        return "sounds great" in compact
+
+    @staticmethod
+    def _looks_like_booking_id_request(text: str) -> bool:
+        lowered = (text or "").lower()
+        cues = (
+            "provide booking id",
+            "give booking id",
+            "my booking id",
+            "booking id so",
+            "booking reference",
+            "reference number",
+        )
+        return any(cue in lowered for cue in cues)
+
+    @staticmethod
+    def _normalize_confidence(raw: str | None) -> str:
+        value = (raw or "").strip().lower()
+        if value in {"high", "medium", "low"}:
+            return value
+        return "unknown"
+
+    def _disambiguation_prompt(self) -> str:
+        return (
+            "I can help in three ways: new booking, booking status by booking ID, or service and pricing questions. "
+            "Which one do you want now?"
+        )
+
+    def _resolve_intent(
+        self,
+        text: str,
+        llm_intent: str,
+        llm_confidence: str,
+    ) -> tuple[str, str | None, str]:
+        booking_id = self._extract_booking_id(text)
+
+        strong_tracking = bool(booking_id or self._looks_like_tracking_request(text))
+        strong_info = self._looks_like_info_request(text) and not self._looks_like_new_booking_request(text)
+        strong_new_booking = self._looks_like_new_booking_request(text)
+
+        if strong_tracking:
+            return "track_booking", booking_id, "high"
+        if strong_info:
+            return "business_info", booking_id, "high"
+        if strong_new_booking:
+            return "new_booking", booking_id, "high"
+
+        resolved_intent = llm_intent
+        confidence = self._normalize_confidence(llm_confidence)
+
+        if resolved_intent == "track_booking" and not booking_id:
+            resolved_intent = "unclear"
+            confidence = "low"
+
+        if confidence == "low" and resolved_intent in {"new_booking", "track_booking", "business_info", "pricing_info"}:
+            resolved_intent = "unclear"
+
+        return resolved_intent, booking_id, confidence
 
     async def start_session(self, call_id: str, agent_id: str | None = None) -> dict[str, str]:
         agent_config = await self.backend_client.fetch_agent_config(agent_id)
+        preferred_language = agent_config.default_greeting_language or agent_config.language or "en"
         session = CallSession(
             call_id=call_id,
             agent_config=agent_config,
-            preferred_language=agent_config.language or "en",
+            preferred_language=preferred_language.lower(),
         )
         self.sessions.save(session)
+
         greeting = agent_config.greeting or prompts.GREETING_TEMPLATE
         audio_url = ""
         try:
-            audio_url = await self.tts_client.synthesize_text(greeting)
+            voice_id = agent_config.language_voice_map.get(session.preferred_language or "")
+            audio_url = await self.tts_client.synthesize_text(greeting, voice_id=voice_id)
         except Exception:  # noqa: BLE001
-            logger.warning("Greeting TTS failed, continuing with text only", call_id=call_id)
-        logger.info("Conversation started", call_id=call_id)
+            logger.warning("Greeting TTS failed, proceeding with text response", call_id=call_id)
+
+        logger.bind(call_id=call_id).info("Conversation session started")
         return {"text": greeting, "audio_url": audio_url}
 
     async def process_user_input(
@@ -194,85 +325,130 @@ class ConversationEngine:
         transcribed_text: str,
         agent_id: str | None = None,
     ) -> dict[str, str | None]:
-        session = await self._get_or_create_session(call_id, agent_id)
+        session = await self._get_or_create_session(call_id=call_id, agent_id=agent_id)
         self.sessions.prune()
-        logger.bind(call_id=call_id).debug("Processing user input", state=session.current_state, task=session.task_intent)
+        start = time.perf_counter()
+        previous_state = session.current_state
 
         text = (transcribed_text or "").strip()
-        if text.lower() in {"cancel", "stop", "hang up"}:
-            session.current_state = "end"
+        logger.bind(call_id=call_id).debug(
+            "Processing user turn",
+            state=session.current_state,
+            task_intent=session.task_intent,
+            has_text=bool(text),
+        )
+        response: dict[str, str | None]
+        try:
+            if self._is_farewell(text):
+                session.current_state = "end"
+                response = {
+                    "action": "hangup",
+                    "text_to_speak": "Thank you for calling. Goodbye.",
+                    "transfer_number": None,
+                }
+            else:
+                if text and session.agent_config.multilingual_enabled:
+                    detected_lang = await self.llm_client.detect_language_preference(
+                        user_input=text,
+                        supported_languages=session.agent_config.supported_languages,
+                        default_language=session.preferred_language or session.agent_config.default_greeting_language or "en",
+                    )
+                    session.preferred_language = detected_lang
+
+                if session.current_state in {"greeting", "intent"}:
+                    response = await self._handle_intent_entry(session, text)
+                elif session.current_state == "intake":
+                    response = await self._handle_intake_turn(session, text)
+                elif session.current_state == "booking":
+                    response = await self._complete_booking(session)
+                elif session.current_state == "assist":
+                    response = await self._handle_assist_turn(session, text)
+                elif session.current_state == "transfer":
+                    response = {
+                        "action": "transfer",
+                        "text_to_speak": "Please hold while I transfer you.",
+                        "transfer_number": session.agent_config.fallback_phone,
+                    }
+                else:
+                    response = {
+                        "action": "hangup",
+                        "text_to_speak": "Thank you for calling. Goodbye.",
+                        "transfer_number": None,
+                    }
+        finally:
             self.sessions.save(session)
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            logger.bind(call_id=call_id).info(
+                "Turn processed",
+                latency_ms=latency_ms,
+                state_from=previous_state,
+                state_to=session.current_state,
+                intent=session.last_intent or "n/a",
+                confidence=session.intent_confidence,
+                action=(response.get("action") if "response" in locals() else "error"),
+            )
+
+        return response
+
+    async def _handle_intent_entry(self, session: CallSession, text: str) -> dict[str, str | None]:
+        if not text:
+            session.current_state = "intent"
+            session.last_intent = "unclear"
+            session.intent_confidence = "unknown"
+            return {
+                "action": "speak",
+                "text_to_speak": self._disambiguation_prompt(),
+                "transfer_number": None,
+            }
+
+        intent_payload = await self.llm_client.detect_call_intent(
+            user_input=text,
+            context={
+                "state": session.current_state,
+                "business_name": session.agent_config.business_name,
+                "services": [service.name for service in session.agent_config.service_catalog],
+            },
+        )
+        intent, booking_id, confidence = self._resolve_intent(
+            text=text,
+            llm_intent=str(intent_payload.get("intent") or "unclear"),
+            llm_confidence=str(intent_payload.get("confidence") or "unknown"),
+        )
+        session.last_intent = intent
+        session.intent_confidence = confidence
+
+        logger.bind(call_id=session.call_id).info(
+            "Intent resolution",
+            resolved_intent=intent,
+            booking_id=booking_id,
+            llm_intent=intent_payload.get("intent"),
+            raw_text=text,
+        )
+
+        if intent == "end_call":
+            session.current_state = "end"
             return {
                 "action": "hangup",
-                "text_to_speak": "Request cancelled. Thank you for contacting us.",
+                "text_to_speak": "Thank you for calling. Goodbye.",
                 "transfer_number": None,
             }
 
-        if session.current_state == "greeting":
-            response = await self._handle_greeting_turn(session, text)
-            self.sessions.save(session)
-            return response
-
-        if session.current_state == "intake":
-            result = await handle_intake(session, text, self.llm_client)
-            self.sessions.save(session)
-            if result["action"] == "next":
-                return {"action": "speak", "text_to_speak": result["text"], "transfer_number": None}
-            if result["action"] == "disqualify":
-                session.current_state = "end"
-                self.sessions.save(session)
-                return {"action": "hangup", "text_to_speak": result["text"], "transfer_number": None}
-            if result["action"] == "out_of_coverage":
-                session.current_state = "assist"
-                session.task_intent = "business_info"
-                self.sessions.save(session)
-                return {"action": "speak", "text_to_speak": result["text"], "transfer_number": None}
-
-            session.current_state = "booking"
-            self.sessions.save(session)
-            return await self._complete_booking(session)
-
-        if session.current_state == "booking":
-            return await self._complete_booking(session)
-
-        if session.current_state == "assist":
-            response = await self._handle_assist_turn(session, text)
-            self.sessions.save(session)
-            return response
-
-        if session.current_state == "transfer":
-            transfer_number = session.agent_config.fallback_phone
+        if intent == "transfer_request" and session.agent_config.fallback_phone:
+            session.current_state = "transfer"
             return {
                 "action": "transfer",
-                "text_to_speak": "I will transfer you to a specialist now. Please hold.",
-                "transfer_number": transfer_number,
+                "text_to_speak": "Sure, I will transfer you to a human agent now.",
+                "transfer_number": session.agent_config.fallback_phone,
             }
 
-        return {"action": "hangup", "text_to_speak": "Thank you for calling. Goodbye!", "transfer_number": None}
-
-    async def _handle_greeting_turn(self, session: CallSession, text: str) -> dict[str, str | None]:
-        if not text:
-            return {
-                "action": "speak",
-                "text_to_speak": (
-                    "Tell me what you want to do: new booking, track existing booking by booking ID, "
-                    "or know about services and pricing."
-                ),
-                "transfer_number": None,
-            }
-
-        intent_payload = await self._detect_call_intent(text)
-        intent = intent_payload.get("intent", "unclear")
-        extracted_booking_id = intent_payload.get("booking_id", "") or self._extract_booking_id(text) or ""
-
-        if intent == "track_booking":
+        if intent == "track_booking" or booking_id:
             session.current_state = "assist"
             session.task_intent = "track_booking"
-            if extracted_booking_id:
-                return await self._handle_track_booking(session, extracted_booking_id)
+            if booking_id:
+                return await self._handle_track_booking(session, booking_id)
             return {
                 "action": "speak",
-                "text_to_speak": "Sure. Please share your booking ID so I can track it.",
+                "text_to_speak": "Sure. Please share your booking ID and I will check the latest status.",
                 "transfer_number": None,
             }
 
@@ -280,231 +456,293 @@ class ConversationEngine:
             session.current_state = "assist"
             session.task_intent = "business_info"
             info = await self.backend_client.answer_business_query(text, agent_id=session.agent_config.agent_id)
-            follow_up = " If you want to book now, tell me the service name."
             return {
                 "action": "speak",
-                "text_to_speak": f"{info.get('answer', '')}{follow_up}",
+                "text_to_speak": f"{info.get('answer', '')} If you want, I can help you book now.",
                 "transfer_number": None,
             }
 
         if intent == "new_booking":
             session.current_state = "intake"
             session.task_intent = "new_booking"
-            result = await handle_intake(session, text, self.llm_client)
-            if result["action"] == "next":
-                return {"action": "speak", "text_to_speak": result["text"], "transfer_number": None}
-            if result["action"] == "disqualify":
-                session.current_state = "end"
-                return {"action": "hangup", "text_to_speak": result["text"], "transfer_number": None}
-            if result["action"] == "out_of_coverage":
-                session.current_state = "assist"
-                session.task_intent = "business_info"
-                return {"action": "speak", "text_to_speak": result["text"], "transfer_number": None}
+            return await self._handle_intake_turn(session, text)
+
+        session.current_state = "intent"
+        return {"action": "speak", "text_to_speak": self._disambiguation_prompt(), "transfer_number": None}
+
+    async def _handle_intake_turn(self, session: CallSession, text: str) -> dict[str, str | None]:
+        result = await handle_intake(session, text, self.llm_client)
+        action = result.get("action")
+
+        if action == "next":
+            return {
+                "action": "speak",
+                "text_to_speak": str(result.get("text") or prompts.INTAKE_FALLBACK),
+                "transfer_number": None,
+            }
+
+        if action == "info_then_reask":
+            info = await self.backend_client.answer_business_query(text, agent_id=session.agent_config.agent_id)
+            session.awaiting_answer = True
+            return {
+                "action": "speak",
+                "text_to_speak": (
+                    f"{info.get('answer', '')} "
+                    "To continue your booking, please answer the current booking question."
+                ),
+                "transfer_number": None,
+            }
+
+        if action == "out_of_coverage":
+            session.current_state = "assist"
+            session.task_intent = "business_info"
+            return {
+                "action": "speak",
+                "text_to_speak": str(result.get("text") or "Currently we only serve Bahrain."),
+                "transfer_number": None,
+            }
+
+        if action == "transfer":
+            session.current_state = "transfer"
+            return {
+                "action": "transfer",
+                "text_to_speak": str(result.get("text") or "I will transfer you to a human agent."),
+                "transfer_number": str(result.get("transfer_number") or session.agent_config.fallback_phone),
+            }
+
+        if action == "disqualify":
+            session.current_state = "end"
+            return {
+                "action": "hangup",
+                "text_to_speak": str(result.get("text") or "Thank you for calling."),
+                "transfer_number": None,
+            }
+
+        if action == "complete":
             session.current_state = "booking"
             return await self._complete_booking(session)
 
+        session.awaiting_answer = True
         return {
             "action": "speak",
-            "text_to_speak": (
-                "I can help with new booking, booking tracking by booking ID, or service information. "
-                "Tell me what you want to do."
-            ),
+            "text_to_speak": prompts.INTAKE_FALLBACK,
             "transfer_number": None,
         }
 
     async def _handle_assist_turn(self, session: CallSession, text: str) -> dict[str, str | None]:
-        if self._is_farewell(text):
-            session.current_state = "end"
-            return {"action": "hangup", "text_to_speak": "Thank you for calling. Goodbye.", "transfer_number": None}
-
         if not text:
-            return {"action": "speak", "text_to_speak": "Is there anything else I can help you with?", "transfer_number": None}
+            return {
+                "action": "speak",
+                "text_to_speak": "Is there anything else I can help you with?",
+                "transfer_number": None,
+            }
 
-        # track-booking flow first if caller asked for tracking
-        if session.task_intent == "track_booking" or self._looks_like_tracking_request(text):
-            session.task_intent = "track_booking"
-            booking_id = self._extract_booking_id(text)
-            if booking_id:
-                return await self._handle_track_booking(session, booking_id)
+        if session.booking_completed and self._looks_like_no_more_help(text):
+            session.current_state = "end"
+            session.task_intent = "undecided"
+            return {
+                "action": "hangup",
+                "text_to_speak": "Perfect. Thanks for calling. Have a great day.",
+                "transfer_number": None,
+            }
 
-            # Let caller switch from tracking to booking naturally
-            if self._looks_like_new_booking_request(text):
-                session.task_intent = "new_booking"
-                session.current_state = "intake"
-                result = await handle_intake(session, text, self.llm_client)
-                if result["action"] == "next":
-                    return {"action": "speak", "text_to_speak": result["text"], "transfer_number": None}
+        if session.booking_completed and self._looks_like_gratitude(text):
+            session.task_intent = "undecided"
+            return {
+                "action": "speak",
+                "text_to_speak": "You're welcome. If you need anything else, I can help now.",
+                "transfer_number": None,
+            }
+
+        if session.booking_completed and self._looks_like_acknowledgement(text):
+            booking_hint = (
+                f"Your booking ID is {session.last_booking_ref}. "
+                if session.last_booking_ref
+                else ""
+            )
+            session.task_intent = "undecided"
+            return {
+                "action": "speak",
+                "text_to_speak": (
+                    f"Great. {booking_hint}"
+                    "If you want, I can also check booking status or answer service questions."
+                ),
+                "transfer_number": None,
+            }
+
+        if session.booking_completed and self._looks_like_booking_id_request(text):
+            if session.last_booking_ref:
                 return {
                     "action": "speak",
-                    "text_to_speak": "Please share the service you want to book.",
+                    "text_to_speak": (
+                        f"Your latest booking ID is {session.last_booking_ref}. "
+                        "You can say track booking and share this ID anytime."
+                    ),
                     "transfer_number": None,
                 }
-
             return {
                 "action": "speak",
-                "text_to_speak": "Please share your booking ID (example DUMMY-10001) so I can track it.",
+                "text_to_speak": "Your booking is confirmed. I can fetch details if you share the booking ID.",
                 "transfer_number": None,
             }
 
-        # if caller asks for new booking from assist mode, switch to booking flow
-        if self._looks_like_new_booking_request(text) or self._mentions_known_service(session, text):
+        intent_payload = await self.llm_client.detect_call_intent(
+            user_input=text,
+            context={
+                "state": "assist",
+                "task_intent": session.task_intent,
+                "booking_completed": session.booking_completed,
+            },
+        )
+        intent, booking_id, confidence = self._resolve_intent(
+            text=text,
+            llm_intent=str(intent_payload.get("intent") or "unclear"),
+            llm_confidence=str(intent_payload.get("confidence") or "unknown"),
+        )
+        session.last_intent = intent
+        session.intent_confidence = confidence
+
+        if intent == "end_call" or self._is_farewell(text):
+            session.current_state = "end"
+            return {
+                "action": "hangup",
+                "text_to_speak": "Thank you for calling. Goodbye.",
+                "transfer_number": None,
+            }
+
+        if intent == "transfer_request" and session.agent_config.fallback_phone:
+            session.current_state = "transfer"
+            return {
+                "action": "transfer",
+                "text_to_speak": "Sure, I will transfer you now.",
+                "transfer_number": session.agent_config.fallback_phone,
+            }
+
+        wants_tracking = (
+            intent == "track_booking"
+            or (session.task_intent == "track_booking" and (booking_id or self._looks_like_tracking_request(text)))
+        )
+        if wants_tracking:
+            session.task_intent = "track_booking"
+            if not booking_id:
+                if session.last_booking_ref:
+                    return await self._handle_track_booking(session, session.last_booking_ref)
+                return {
+                    "action": "speak",
+                    "text_to_speak": "Please share your booking ID to continue tracking.",
+                    "transfer_number": None,
+                }
+            return await self._handle_track_booking(session, booking_id)
+
+        if intent == "new_booking":
             session.task_intent = "new_booking"
             session.current_state = "intake"
-            result = await handle_intake(session, text, self.llm_client)
-            if result["action"] == "next":
-                return {"action": "speak", "text_to_speak": result["text"], "transfer_number": None}
-            if result["action"] == "disqualify":
-                session.current_state = "end"
-                return {"action": "hangup", "text_to_speak": result["text"], "transfer_number": None}
-            return await self._complete_booking(session)
+            session.current_question_index = 0
+            session.awaiting_answer = False
+            session.collected_answers.clear()
+            session.booking_completed = False
+            session.post_booking_stage = None
+            return await self._handle_intake_turn(session, text)
 
-        if self._looks_like_service_question(text) or self._looks_like_pricing_question(text):
+        if intent in {"business_info", "pricing_info"}:
             info = await self.backend_client.answer_business_query(text, agent_id=session.agent_config.agent_id)
-            return {"action": "speak", "text_to_speak": info.get("answer", ""), "transfer_number": None}
-
-        if self._looks_like_booking_detail_question(text):
-            required = session.agent_config.booking_required_fields or [
-                "service type",
-                "location",
-                "preferred time",
-                "contact number",
-            ]
+            follow_up = " Would you like to make a booking now or ask another question?"
             return {
                 "action": "speak",
-                "text_to_speak": f"To complete booking we need: {', '.join(required)}.",
+                "text_to_speak": f"{info.get('answer', '')}{follow_up}",
                 "transfer_number": None,
             }
-
-        messages = list(build_system_messages(session.agent_config, session.preferred_language))
-        messages.extend(prompts.FEW_SHOT_EXAMPLES)
-        messages.append(
-            {
-                "role": "system",
-                "content": (
-                    "You are in assist mode. Be helpful, concise, and practical. "
-                    "If user asks business questions, answer clearly then ask what they want next."
-                ),
-            }
-        )
-        messages.append(
-            {
-                "role": "user",
-                "content": (
-                    f"Collected answers: {session.collected_answers}\n"
-                    f"Task intent: {session.task_intent}\n"
-                    f"Caller: {text}"
-                ),
-            }
-        )
-        reply = await self.llm_client.generate_reply(messages)
-        return {"action": "speak", "text_to_speak": reply, "transfer_number": None}
+        return {
+            "action": "speak",
+            "text_to_speak": self._disambiguation_prompt(),
+            "transfer_number": None,
+        }
 
     async def _handle_track_booking(self, session: CallSession, booking_id: str) -> dict[str, str | None]:
         payload = await self.backend_client.track_booking(booking_id, agent_id=session.agent_config.agent_id)
         status = str(payload.get("status", "")).lower()
-        message = str(payload.get("message", "")).strip() or "I checked the booking status."
+        message = str(payload.get("message") or "I checked the booking status.").strip()
+        session.task_intent = "undecided"
+        session.last_booking_ref = booking_id
 
         if status == "not_found":
             return {
                 "action": "speak",
-                "text_to_speak": f"{message} You can share another booking ID or start a new booking now.",
+                "text_to_speak": f"{message} You can share another booking ID or create a new booking now.",
                 "transfer_number": None,
             }
 
-        extra = []
-        service_name = payload.get("service_name")
-        location = payload.get("location")
-        preferred_time = payload.get("preferred_time")
-        if service_name:
-            extra.append(f"Service: {service_name}.")
-        if location:
-            extra.append(f"Location: {location}.")
-        if preferred_time:
-            extra.append(f"Time: {preferred_time}.")
+        detail_parts: list[str] = [message]
+        for key, prefix in (("service_name", "Service"), ("location", "Location"), ("preferred_time", "Time")):
+            value = payload.get(key)
+            if value:
+                detail_parts.append(f"{prefix}: {value}.")
 
-        text = " ".join([message, *extra, "Do you need anything else?"]).strip()
-        return {"action": "speak", "text_to_speak": text, "transfer_number": None}
+        detail_parts.append("Do you need any other help?")
+        return {
+            "action": "speak",
+            "text_to_speak": " ".join(detail_parts),
+            "transfer_number": None,
+        }
 
-    async def _detect_call_intent(self, text: str) -> dict[str, str]:
-        if hasattr(self.llm_client, "detect_call_intent"):
-            try:
-                payload = await self.llm_client.detect_call_intent(text)
-                if isinstance(payload, dict):
-                    return {
-                        "intent": str(payload.get("intent", "unclear")),
-                        "booking_id": str(payload.get("booking_id", "")),
-                    }
-            except Exception:  # noqa: BLE001
-                logger.exception("Intent detection via LLM failed; using heuristic fallback")
+    async def _complete_booking(self, session: CallSession) -> dict[str, str | None]:
+        if session.booking_completed:
+            session.current_state = "assist"
+            session.task_intent = "undecided"
+            return {
+                "action": "speak",
+                "text_to_speak": "Your booking is already recorded. Anything else I can help with?",
+                "transfer_number": None,
+            }
 
-        if self._looks_like_tracking_request(text):
-            return {"intent": "track_booking", "booking_id": self._extract_booking_id(text) or ""}
-        if self._looks_like_pricing_question(text):
-            return {"intent": "pricing_info", "booking_id": ""}
-        if self._looks_like_service_question(text):
-            return {"intent": "business_info", "booking_id": ""}
-        if self._looks_like_new_booking_request(text):
-            return {"intent": "new_booking", "booking_id": ""}
-        return {"intent": "unclear", "booking_id": ""}
+        booking_action = await handle_booking(session, self.backend_client, self.llm_client)
+        action = booking_action.get("action")
+
+        if action == "speak":
+            booking_ref = booking_action.get("booking_ref")
+            if booking_ref:
+                session.last_booking_ref = str(booking_ref)
+            session.last_booking_payload = {
+                "service_type": session.collected_answers.get("service_type"),
+                "location": session.collected_answers.get("location"),
+                "preferred_time": session.collected_answers.get("preferred_time"),
+            }
+            session.booking_completed = True
+            session.current_state = "assist"
+            session.task_intent = "undecided"
+            session.post_booking_stage = "completed"
+            return {
+                "action": "speak",
+                "text_to_speak": str(booking_action.get("text_to_speak") or "Booking recorded."),
+                "transfer_number": None,
+            }
+
+        if action == "transfer":
+            session.current_state = "transfer"
+            return {
+                "action": "transfer",
+                "text_to_speak": str(booking_action.get("text_to_speak") or "Please hold for transfer."),
+                "transfer_number": str(booking_action.get("transfer_number") or session.agent_config.fallback_phone),
+            }
+
+        session.current_state = "end"
+        return {
+            "action": "hangup",
+            "text_to_speak": str(booking_action.get("text_to_speak") or "Thank you for calling."),
+            "transfer_number": None,
+        }
 
     def end_call(self, call_id: str) -> None:
         self.sessions.delete(call_id)
-        logger.info("Conversation ended", call_id=call_id)
+        logger.bind(call_id=call_id).info("Conversation session ended")
 
     async def _get_or_create_session(self, call_id: str, agent_id: str | None = None) -> CallSession:
-        session = self.sessions.get(call_id)
-        if session:
-            return session
-        await self.start_session(call_id, agent_id)
-        session = self.sessions.get(call_id)
-        if not session:
-            raise ConversationEngineError(f"Unable to create session for {call_id}")
-        return session
+        existing = self.sessions.get(call_id)
+        if existing:
+            return existing
 
-    async def _complete_booking(self, session: CallSession) -> dict[str, str | None]:
-        if session.out_of_coverage:
-            session.current_state = "assist"
-            session.task_intent = "business_info"
-            self.sessions.save(session)
-            return {
-                "action": "speak",
-                "text_to_speak": (
-                    "Your location appears outside Bahrain. I can still answer questions and arrange human follow-up if needed."
-                ),
-                "transfer_number": None,
-            }
-
-        if session.booking_completed:
-            session.current_state = "assist"
-            session.task_intent = "business_info"
-            self.sessions.save(session)
-            return {
-                "action": "speak",
-                "text_to_speak": "Your booking is already recorded. What else can I help you with?",
-                "transfer_number": None,
-            }
-
-        booking = await handle_booking(session, self.backend_client, self.llm_client)
-        if booking.get("action") == "speak":
-            session.booking_completed = True
-            session.current_state = "assist"
-            session.task_intent = "business_info"
-        elif booking.get("action") == "transfer":
-            session.current_state = "transfer"
-        else:
-            session.current_state = "end"
-        self.sessions.save(session)
-        return booking
-
-    def _compose_messages(self, session: CallSession) -> Sequence[dict[str, str]]:
-        messages = list(build_system_messages(session.agent_config, session.preferred_language))
-        messages.extend(prompts.FEW_SHOT_EXAMPLES)
-
-        summary_lines = [
-            f"Question {idx + 1}: {session.agent_config.intake_questions[idx]} -> {session.collected_answers.get(f'q{idx}', 'N/A')}"
-            for idx in range(len(session.agent_config.intake_questions))
-        ]
-        intake_summary = "\n".join(summary_lines)
-        messages.append({"role": "assistant", "content": "Here is what we captured so far:"})
-        messages.append({"role": "user", "content": intake_summary})
-        return messages
+        await self.start_session(call_id=call_id, agent_id=agent_id)
+        created = self.sessions.get(call_id)
+        if created is None:
+            raise ConversationEngineError(f"Unable to create session for call_id={call_id}")
+        return created

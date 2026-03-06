@@ -7,7 +7,7 @@
     AgentTrackBookingResponse,
     AgentUIContextResponse,
 )
-from .call import TelephonyWebhookRequest, TelephonyResponse
+from .call import TelephonyEventRequest, TelephonyWebhookRequest, TelephonyResponse
 from .voice import TTSRequest, TTSResponse
 from .error import ErrorResponse
 
@@ -19,6 +19,7 @@ __all__ = [
     "AgentBusinessQueryResponse",
     "AgentTrackBookingRequest",
     "AgentTrackBookingResponse",
+    "TelephonyEventRequest",
     "TelephonyWebhookRequest",
     "TelephonyResponse",
     "TTSRequest",
