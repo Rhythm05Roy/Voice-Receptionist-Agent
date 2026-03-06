@@ -81,11 +81,22 @@ class ServiceInfo(BaseModel):
     service_id: str
     name: str
     description: str
-    base_price_bhd: str
+    base_price_bhd: str = Field(default="", description="Legacy field, use base_price instead")
+    base_price: str = Field(default="", description="Price range or base price")
+    currency: str = Field(default="", description="Currency code, e.g. USD, BHD, EUR")
     price_note: str = ""
     keywords: list[str] = Field(default_factory=list)
 
     model_config = ConfigDict(extra="ignore")
+
+    @model_validator(mode="after")
+    def backfill_price(self) -> ServiceInfo:
+        """Ensure base_price is populated from legacy field if needed."""
+        if not self.base_price and self.base_price_bhd:
+            self.base_price = self.base_price_bhd
+        if not self.base_price_bhd and self.base_price:
+            self.base_price_bhd = self.base_price
+        return self
 
 
 class AgentConfig(BaseModel):
@@ -99,9 +110,10 @@ class AgentConfig(BaseModel):
     default_greeting_language: str = Field(default="en")
     language_voice_map: dict[str, str] = Field(default_factory=dict)
     fallback_phone: str | None = Field(default=None)
-    max_call_duration_minutes: int = Field(default=5, ge=1, le=30)
-    coverage_country: str = Field(default="Bahrain")
+    max_call_duration_minutes: int = Field(default=15, ge=1, le=60)
+    coverage_country: str = Field(default="")
     coverage_areas: list[str] = Field(default_factory=list)
+    excluded_areas: list[str] = Field(default_factory=list, description="Country/area names that are out of coverage")
     service_catalog: list[ServiceInfo] = Field(default_factory=list)
     booking_required_fields: list[str] = Field(default_factory=list)
     faqs: dict[str, str] = Field(default_factory=dict)

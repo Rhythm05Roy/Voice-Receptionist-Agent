@@ -6,7 +6,12 @@
       "greeting": "Hello, this is Bahrain HomeCare Group. How can I help you today?",
       "language": "en",
       "multilingual_enabled": true,
-      "supported_languages": ["en", "ar", "hi", "es"],
+      "supported_languages": [
+        "en",
+        "ar",
+        "hi",
+        "es"
+      ],
       "default_greeting_language": "en",
       "language_voice_map": {
         "en": "11labs-en-default",
@@ -56,7 +61,10 @@
           "answer_type": "yes_no",
           "required": false,
           "ask_when": "specific_services",
-          "service_tags": ["cleaning", "salon"]
+          "service_tags": [
+            "cleaning",
+            "salon"
+          ]
         }
       ],
       "booking_required_fields": [
@@ -72,7 +80,14 @@
           "description": "Diagnosis, refrigerant check, filter cleaning, and cooling optimization.",
           "base_price_bhd": "10-35 BHD",
           "price_note": "Final cost depends on spare parts and compressor condition.",
-          "keywords": ["ac", "air conditioner", "cooling", "hvac", "split unit", "ac repair"]
+          "keywords": [
+            "ac",
+            "air conditioner",
+            "cooling",
+            "hvac",
+            "split unit",
+            "ac repair"
+          ]
         },
         {
           "service_id": "deep_cleaning",
@@ -80,7 +95,14 @@
           "description": "Kitchen, bathroom, floors, glass, and optional sanitization package.",
           "base_price_bhd": "12-45 BHD",
           "price_note": "Price varies by home size, number of rooms, and add-ons.",
-          "keywords": ["cleaning", "deep clean", "house cleaning", "sanitize", "maid", "home cleaning"]
+          "keywords": [
+            "cleaning",
+            "deep clean",
+            "house cleaning",
+            "sanitize",
+            "maid",
+            "home cleaning"
+          ]
         },
         {
           "service_id": "salon_home",
@@ -88,7 +110,13 @@
           "description": "Haircut, beard trim, and basic grooming at customer location.",
           "base_price_bhd": "8-25 BHD",
           "price_note": "Premium stylist and late-night slots cost extra.",
-          "keywords": ["salon", "haircut", "beard", "grooming", "stylist"]
+          "keywords": [
+            "salon",
+            "haircut",
+            "beard",
+            "grooming",
+            "stylist"
+          ]
         },
         {
           "service_id": "general_maintenance",
@@ -96,7 +124,13 @@
           "description": "Minor electrical, plumbing, and fixture fixes.",
           "base_price_bhd": "9-30 BHD",
           "price_note": "Materials are billed separately when needed.",
-          "keywords": ["maintenance", "plumbing", "electric", "fix", "repair"]
+          "keywords": [
+            "maintenance",
+            "plumbing",
+            "electric",
+            "fix",
+            "repair"
+          ]
         }
       ],
       "business_description": "Professional home service support across Bahrain for homeowners and small offices.",
@@ -128,10 +162,19 @@
       "greeting": "Welcome to Pearl Elite Home Services. How may I assist you today?",
       "language": "en",
       "multilingual_enabled": true,
-      "supported_languages": ["en", "ar", "fr"],
+      "supported_languages": [
+        "en",
+        "ar",
+        "fr"
+      ],
       "default_greeting_language": "en",
       "coverage_country": "Bahrain",
-      "coverage_areas": ["Manama", "Seef", "Saar", "Busaiteen"],
+      "coverage_areas": [
+        "Manama",
+        "Seef",
+        "Saar",
+        "Busaiteen"
+      ],
       "fallback_phone": "+97317111111",
       "max_call_duration_minutes": 7,
       "intake_questions": [
@@ -157,7 +200,13 @@
           "ask_when": "all_bookings"
         }
       ],
-      "booking_required_fields": ["service_type", "location", "preferred_time", "customer_name", "contact_number"],
+      "booking_required_fields": [
+        "service_type",
+        "location",
+        "preferred_time",
+        "customer_name",
+        "contact_number"
+      ],
       "service_catalog": [
         {
           "service_id": "premium_cleaning",
@@ -165,7 +214,11 @@
           "description": "Senior cleaning team with eco-safe supplies.",
           "base_price_bhd": "25-70 BHD",
           "price_note": "Depends on villa/apartment size and urgency.",
-          "keywords": ["premium cleaning", "vip cleaning", "cleaning"]
+          "keywords": [
+            "premium cleaning",
+            "vip cleaning",
+            "cleaning"
+          ]
         }
       ],
       "business_description": "Premium at-home services for high-end residential clients.",
@@ -177,8 +230,12 @@
         "coverage": "Premium service is available in selected Bahrain areas only.",
         "payment": "Online card and bank transfer are accepted."
       },
-      "additional_information": ["Priority scheduling available for member clients."],
-      "notes": ["Dummy premium agent for multi-business simulation."]
+      "additional_information": [
+        "Priority scheduling available for member clients."
+      ],
+      "notes": [
+        "Dummy premium agent for multi-business simulation."
+      ]
     }
   },
   "bookings": {
@@ -205,6 +262,108 @@
       "service_name": "General Maintenance",
       "location": "Muharraq",
       "preferred_time": "11:00 AM"
+    },
+    "DUMMY-1772788912": {
+      "status": "mock_confirmed",
+      "booking_ref": "DUMMY-1772788912",
+      "short_booking_id": "88912",
+      "service_name": "AC Repair and Maintenance",
+      "service_id": "ac_repair",
+      "location": "Bahrain and Manali",
+      "preferred_time": "12pm to 12pm",
+      "price_range": "10-35 BHD",
+      "message": "Booking DUMMY-1772788912 is created for AC Repair and Maintenance in Bahrain and Manali at 12pm to 12pm. Short ID is 88912. Our operations team will confirm final timing and quote shortly.",
+      "answers": {
+        "service_type": "AC Repair and Maintenance",
+        "q0": "AC Repair and Maintenance",
+        "location": "Bahrain and Manali",
+        "q1": "Bahrain and Manali",
+        "preferred_time": "12pm to 12pm",
+        "q2": "12pm to 12pm"
+      }
+    },
+    "88912": {
+      "status": "mock_confirmed",
+      "booking_ref": "DUMMY-1772788912",
+      "short_booking_id": "88912",
+      "service_name": "AC Repair and Maintenance",
+      "service_id": "ac_repair",
+      "location": "Bahrain and Manali",
+      "preferred_time": "12pm to 12pm",
+      "price_range": "10-35 BHD",
+      "message": "Booking DUMMY-1772788912 is created for AC Repair and Maintenance in Bahrain and Manali at 12pm to 12pm. Short ID is 88912. Our operations team will confirm final timing and quote shortly.",
+      "answers": {
+        "service_type": "AC Repair and Maintenance",
+        "q0": "AC Repair and Maintenance",
+        "location": "Bahrain and Manali",
+        "q1": "Bahrain and Manali",
+        "preferred_time": "12pm to 12pm",
+        "q2": "12pm to 12pm"
+      }
+    },
+    "DUMMY-1772791021": {
+      "status": "mock_confirmed",
+      "booking_ref": "DUMMY-1772791021",
+      "short_booking_id": "91021",
+      "service_name": "At-Home Salon",
+      "service_id": "salon_home",
+      "location": "Bahrain",
+      "preferred_time": "12 pm to 2 pm",
+      "price_range": "8-25 BHD",
+      "message": "Booking DUMMY-1772791021 is created for At-Home Salon in Bahrain at 12 pm to 2 pm. Short ID is 91021. Our operations team will confirm final timing and quote shortly.",
+      "answers": {
+        "service_type": "At-Home Salon",
+        "location": "Bahrain",
+        "preferred_time": "12 pm to 2 pm"
+      }
+    },
+    "91021": {
+      "status": "mock_confirmed",
+      "booking_ref": "DUMMY-1772791021",
+      "short_booking_id": "91021",
+      "service_name": "At-Home Salon",
+      "service_id": "salon_home",
+      "location": "Bahrain",
+      "preferred_time": "12 pm to 2 pm",
+      "price_range": "8-25 BHD",
+      "message": "Booking DUMMY-1772791021 is created for At-Home Salon in Bahrain at 12 pm to 2 pm. Short ID is 91021. Our operations team will confirm final timing and quote shortly.",
+      "answers": {
+        "service_type": "At-Home Salon",
+        "location": "Bahrain",
+        "preferred_time": "12 pm to 2 pm"
+      }
+    },
+    "DUMMY-1772791054": {
+      "status": "mock_confirmed",
+      "booking_ref": "DUMMY-1772791054",
+      "short_booking_id": "91054",
+      "service_name": "At-Home Salon",
+      "service_id": "salon_home",
+      "location": "Bahrain",
+      "preferred_time": "12 pm to 2 pm",
+      "price_range": "8-25 BHD",
+      "message": "Booking DUMMY-1772791054 is created for At-Home Salon in Bahrain at 12 pm to 2 pm. Short ID is 91054. Our operations team will confirm final timing and quote shortly.",
+      "answers": {
+        "service_type": "At-Home Salon",
+        "location": "Bahrain",
+        "preferred_time": "12 pm to 2 pm"
+      }
+    },
+    "91054": {
+      "status": "mock_confirmed",
+      "booking_ref": "DUMMY-1772791054",
+      "short_booking_id": "91054",
+      "service_name": "At-Home Salon",
+      "service_id": "salon_home",
+      "location": "Bahrain",
+      "preferred_time": "12 pm to 2 pm",
+      "price_range": "8-25 BHD",
+      "message": "Booking DUMMY-1772791054 is created for At-Home Salon in Bahrain at 12 pm to 2 pm. Short ID is 91054. Our operations team will confirm final timing and quote shortly.",
+      "answers": {
+        "service_type": "At-Home Salon",
+        "location": "Bahrain",
+        "preferred_time": "12 pm to 2 pm"
+      }
     }
   },
   "phone_routing": {

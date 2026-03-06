@@ -300,6 +300,7 @@ class BackendClient:
             "max_call_duration_minutes": payload.get("max_call_duration_minutes") or transfer_settings.get("max_duration_minutes") or 5,
             "coverage_country": payload.get("coverage_country") or "Bahrain",
             "coverage_areas": payload.get("coverage_areas") or [],
+            "excluded_areas": payload.get("excluded_areas") or [],
             "service_catalog": service_catalog,
             "booking_required_fields": payload.get("booking_required_fields") or ["service_type", "location", "preferred_time"],
             "faqs": payload.get("faqs") or {},

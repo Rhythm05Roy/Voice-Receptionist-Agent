@@ -6,7 +6,7 @@ class _FakeEngine:
         self._sessions = set()
         self.ended = []
 
-    def has_session(self, call_id: str) -> bool:
+    async def has_session(self, call_id: str) -> bool:
         return call_id in self._sessions
 
     async def start_session(self, call_id: str, agent_id: str | None = None):
@@ -18,13 +18,14 @@ class _FakeEngine:
             return {"action": "hangup", "text_to_speak": "bye", "transfer_number": None}
         return {"action": "speak", "text_to_speak": f"echo {transcribed_text}", "transfer_number": None}
 
-    def end_call(self, call_id: str) -> None:
+    async def end_call(self, call_id: str) -> None:
         self.ended.append(call_id)
 
 
 class _FakeVonage:
+    """Backward-compat fake that works with both Vonage and Twilio NCCO bridge."""
     def build_talk_ncco(self, text: str, voice_name: str | None = None):
-        return [{"action": "talk", "text": text, "voiceName": voice_name or "Zeina"}]
+        return [{"action": "talk", "text": text, "voiceName": voice_name or "Polly.Joanna"}]
 
     def build_listen_action(self, event_url=None, speech_timeout=7):
         return {"action": "listen", "eventUrl": event_url or [], "speechTimeout": speech_timeout}

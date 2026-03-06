@@ -73,7 +73,7 @@ async def inbound_webhook(
         else:
             stores.no_input[call_id] = stores.no_input.get(call_id, 0) + 1
 
-        if not engine.has_session(call_id):
+        if not await engine.has_session(call_id):
             greeting = await engine.start_session(call_id=call_id, agent_id=agent_id)
             if not speech_text:
                 stores.error_count.pop(call_id, None)
@@ -84,7 +84,7 @@ async def inbound_webhook(
         if not speech_text:
             no_input_count = stores.no_input.get(call_id, 0)
             if no_input_count >= 3:
-                engine.end_call(call_id)
+                await engine.end_call(call_id)
                 stores.clear(call_id)
                 ncco = vonage_client.build_talk_ncco("I still cannot hear you. Please call again when ready.")
                 ncco.append(vonage_client.build_hangup_ncco())
@@ -102,7 +102,7 @@ async def inbound_webhook(
         ncco = vonage_client.build_action_ncco(action, from_number=payload.to_number, event_url=event_url)
 
         if action.get("action") == "hangup":
-            engine.end_call(call_id)
+            await engine.end_call(call_id)
             stores.clear(call_id)
         else:
             stores.error_count.pop(call_id, None)
@@ -115,7 +115,7 @@ async def inbound_webhook(
         stores.error_count[call_id] = errors
 
         if errors >= 2:
-            engine.end_call(call_id)
+            await engine.end_call(call_id)
             stores.clear(call_id)
             fail_ncco = vonage_client.build_talk_ncco("Sorry, something went wrong. Please call us again.")
             fail_ncco.append(vonage_client.build_hangup_ncco())
@@ -135,7 +135,7 @@ async def call_event_webhook(
 ) -> dict[str, str]:
     status = (payload.status or "").strip().lower()
     if status in TERMINAL_STATUSES:
-        engine.end_call(payload.uuid)
+        await engine.end_call(payload.uuid)
         stores = _CallRuntimeStores(request)
         stores.clear(payload.uuid)
 

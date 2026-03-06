@@ -16,8 +16,13 @@ class Settings(BaseSettings):
     elevenlabs_api_key: str = Field(default="dev-elevenlabs-key", alias="ELEVENLABS_API_KEY")
     elevenlabs_voice_id: str = Field(default="dev-voice-id", alias="ELEVENLABS_VOICE_ID")
 
-    assemblyai_api_key: str = Field(default="dev-assemblyai-key", alias="ASSEMBLYAI_API_KEY")
+    # Twilio (primary telephony provider)
+    twilio_account_sid: str = Field(default="", alias="TWILIO_ACCOUNT_SID")
+    twilio_auth_token: str = Field(default="", alias="TWILIO_AUTH_TOKEN")
+    twilio_phone_number: str = Field(default="", alias="TWILIO_PHONE_NUMBER")
+    twilio_websocket_url: str = Field(default="", alias="TWILIO_WEBSOCKET_URL")
 
+    # Legacy Vonage settings (kept for backward compat)
     vonage_api_key: str = Field(default="dev-vonage-key", alias="VONAGE_API_KEY")
     vonage_api_secret: str = Field(default="dev-vonage-secret", alias="VONAGE_API_SECRET")
     vonage_application_id: str = Field(default="dev-vonage-app", alias="VONAGE_APPLICATION_ID")
@@ -27,7 +32,23 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     local_test_mode: bool = Field(default=False, alias="LOCAL_TEST_MODE")
 
+    # Redis for session persistence (falls back to in-memory when None)
+    redis_url: str | None = Field(default=None, alias="REDIS_URL")
+
+    # CORS origins for frontend integration
+    cors_origins: str = Field(default="*", alias="CORS_ORIGINS", description="Comma-separated allowed origins")
+
+    # Webhook verification secret (Twilio auth_token is used for Twilio sig verification)
+    vonage_webhook_secret: str | None = Field(default=None, alias="VONAGE_WEBHOOK_SECRET")
+
+    # API auth token for management endpoints
+    api_auth_token: str | None = Field(default=None, alias="API_AUTH_TOKEN")
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @property
+    def cors_origin_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
 
 
 @lru_cache

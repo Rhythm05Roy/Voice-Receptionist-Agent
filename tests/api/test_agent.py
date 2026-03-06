@@ -5,7 +5,7 @@ class _FakeEngine:
     async def start_session(self, call_id: str, agent_id: str | None = None) -> dict:
         return {"text": "hello", "audio_url": "data:audio/mpeg;base64,AAA"}
 
-    def end_call(self, call_id: str) -> None:
+    async def end_call(self, call_id: str) -> None:
         return None
 
 

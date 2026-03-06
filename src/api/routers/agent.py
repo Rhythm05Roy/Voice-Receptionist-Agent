@@ -25,7 +25,7 @@ async def preview_agent_greeting(
 ) -> TTSResponse:
     call_id = f"preview-{uuid.uuid4()}"
     result = await engine.start_session(call_id=call_id, agent_id=payload.agent_id)
-    engine.end_call(call_id)
+    await engine.end_call(call_id)
     return TTSResponse(audio_url=result["audio_url"], text=result["text"])
 
 

@@ -1,6 +1,20 @@
+"""OpenAI LLM client — function-calling & conversation-history aware.
+
+This is the 'brain' of the voice agent.  Instead of rigid per-question
+classification, the LLM receives the **full conversation history** and
+a set of **tools** (book, track, transfer, end_call) so it can:
+
+* Gather booking details naturally across turns.
+* Handle answer corrections ("change my location to X").
+* Answer side-questions without losing context.
+* Detect frustration and offer human transfer.
+"""
+
+from __future__ import annotations
+
 import json
 import re
-from typing import Any, Sequence
+from typing import Any, AsyncIterator, Sequence
 
 from loguru import logger
 from openai import AsyncOpenAI, OpenAIError
@@ -8,12 +22,258 @@ from openai import AsyncOpenAI, OpenAIError
 from src.api.exceptions import ConversationEngineError
 
 
+# ── Tool / Function schemas ──────────────────────────────────────────
+
+TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "submit_booking",
+            "description": (
+                "Submit a booking request.  Call ONLY when ALL required fields "
+                "have been naturally collected and confirmed with the caller."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "service_type": {
+                        "type": "string",
+                        "description": "The service the caller wants (must match an available service).",
+                    },
+                    "location": {
+                        "type": "string",
+                        "description": "Caller's area / city for the service visit.",
+                    },
+                    "preferred_time": {
+                        "type": "string",
+                        "description": "When the caller wants the visit (e.g. 'tomorrow 2 PM').",
+                    },
+                    "customer_name": {
+                        "type": "string",
+                        "description": "Caller's name if provided.",
+                    },
+                },
+                "required": ["service_type", "location", "preferred_time"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "track_booking",
+            "description": "Look up the status of an existing booking by its ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "booking_id": {
+                        "type": "string",
+                        "description": "The booking reference ID.",
+                    },
+                },
+                "required": ["booking_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "transfer_to_human",
+            "description": (
+                "Transfer the caller to a human agent.  Use when: "
+                "caller explicitly asks, or shows clear frustration, "
+                "or the request is outside your capabilities."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "description": "Brief reason for the transfer.",
+                    },
+                },
+                "required": ["reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "end_call",
+            "description": "End the call politely when the caller says goodbye or has no more needs.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "farewell_message": {
+                        "type": "string",
+                        "description": "A polite goodbye message.",
+                    },
+                },
+                "required": ["farewell_message"],
+            },
+        },
+    },
+]
+
+
 class OpenAIClient:
+    """Conversation-aware LLM client with function-calling support."""
+
     def __init__(self, api_key: str, model: str = "gpt-4o"):
         self.client = AsyncOpenAI(api_key=api_key)
         self.model = model
 
+    # ── Primary conversation method ──────────────────────────────
+
+    async def conversation_turn(
+        self,
+        system_prompt: str,
+        conversation_history: list[dict[str, Any]],
+        user_message: str,
+    ) -> dict[str, Any]:
+        """Process one conversation turn with full context.
+
+        Returns dict with keys:
+          - response_text: str  (what to say to the caller)
+          - tool_calls: list[dict]  (any function calls to execute)
+        """
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+        ]
+
+        # Add conversation history (already role-tagged)
+        for turn in conversation_history:
+            messages.append(turn)
+
+        # Add current user message
+        messages.append({"role": "user", "content": user_message})
+
+        try:
+            completion = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                tools=TOOLS,
+                tool_choice="auto",
+                temperature=0.6,
+                max_tokens=400,
+            )
+
+            choice = completion.choices[0]
+            response_text = (choice.message.content or "").strip()
+            tool_calls: list[dict[str, Any]] = []
+
+            if choice.message.tool_calls:
+                for tc in choice.message.tool_calls:
+                    try:
+                        args = json.loads(tc.function.arguments)
+                    except json.JSONDecodeError:
+                        args = {}
+                    tool_calls.append({
+                        "id": tc.id,
+                        "name": tc.function.name,
+                        "arguments": args,
+                    })
+
+            logger.debug(
+                "LLM turn completed",
+                model=self.model,
+                has_response=bool(response_text),
+                tool_count=len(tool_calls),
+                usage=getattr(completion, "usage", None),
+            )
+
+            return {
+                "response_text": response_text,
+                "tool_calls": tool_calls,
+                "raw_message": choice.message,
+            }
+
+        except OpenAIError as exc:
+            logger.exception("OpenAI conversation_turn failed")
+            raise ConversationEngineError(str(exc)) from exc
+
+    # ── Streaming variant for low-latency TTS ────────────────────
+
+    async def conversation_turn_stream(
+        self,
+        system_prompt: str,
+        conversation_history: list[dict[str, Any]],
+        user_message: str,
+    ) -> AsyncIterator[str]:
+        """Stream text tokens for immediate TTS forwarding.
+
+        Note: streaming does not support tool calls in the same turn.
+        Use conversation_turn() for turns that may require tool calls,
+        and this method for pure conversational responses.
+        """
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+        ]
+        for turn in conversation_history:
+            messages.append(turn)
+        messages.append({"role": "user", "content": user_message})
+
+        try:
+            stream = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=0.6,
+                max_tokens=400,
+                stream=True,
+            )
+
+            async for chunk in stream:
+                delta = chunk.choices[0].delta if chunk.choices else None
+                if delta and delta.content:
+                    yield delta.content
+
+        except OpenAIError as exc:
+            logger.exception("OpenAI streaming failed")
+            raise ConversationEngineError(str(exc)) from exc
+
+    # ── Continue conversation after tool results ─────────────────
+
+    async def continue_after_tool(
+        self,
+        system_prompt: str,
+        conversation_history: list[dict[str, Any]],
+        tool_call_message: Any,
+        tool_results: list[dict[str, Any]],
+    ) -> str:
+        """Send tool results back to GPT and get the follow-up response."""
+        messages: list[dict[str, Any]] = [
+            {"role": "system", "content": system_prompt},
+        ]
+        for turn in conversation_history:
+            messages.append(turn)
+
+        # Add the assistant message that contained the tool call
+        messages.append(tool_call_message)
+
+        # Add each tool result
+        for result in tool_results:
+            messages.append({
+                "role": "tool",
+                "tool_call_id": result["tool_call_id"],
+                "content": json.dumps(result["output"], ensure_ascii=False),
+            })
+
+        try:
+            completion = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=0.6,
+                max_tokens=400,
+            )
+            return (completion.choices[0].message.content or "").strip()
+
+        except OpenAIError as exc:
+            logger.exception("OpenAI continue_after_tool failed")
+            raise ConversationEngineError(str(exc)) from exc
+
+    # ── Simple generation (for greeting rewriting, etc.) ─────────
+
     async def generate_reply(self, messages: Sequence[dict[str, str]]) -> str:
+        """Simple one-shot generation without tools."""
         try:
             completion = await self.client.chat.completions.create(
                 model=self.model,
@@ -22,129 +282,12 @@ class OpenAIClient:
                 max_tokens=320,
             )
             reply = completion.choices[0].message.content or ""
-            logger.debug("LLM reply generated", model=self.model)
             return reply.strip()
         except OpenAIError as exc:
             logger.exception("OpenAI call failed")
             raise ConversationEngineError(str(exc)) from exc
 
-    async def _generate_json(self, messages: Sequence[dict[str, str]]) -> dict[str, Any]:
-        completion = await self.client.chat.completions.create(
-            model=self.model,
-            messages=list(messages),
-            temperature=0,
-            max_tokens=320,
-            response_format={"type": "json_object"},
-        )
-        raw = completion.choices[0].message.content or "{}"
-        return json.loads(raw)
-
-    async def detect_call_intent(self, user_input: str, context: dict[str, Any] | None = None) -> dict[str, str]:
-        prompt = (
-            "Classify the caller request and return strict JSON with keys: intent, booking_id, confidence. "
-            "intent must be one of: new_booking, track_booking, business_info, pricing_info, transfer_request, end_call, unclear. "
-            "Use business_info when caller asks what services, business details, policies, or general help. "
-            "Use new_booking only when caller clearly wants to book now. "
-            "Use track_booking when caller asks status/reschedule/cancel for an existing booking. "
-            "Extract booking_id when present (example DUMMY-10001)."
-        )
-        messages = [
-            {"role": "system", "content": prompt},
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "text": user_input,
-                        "context": context or {},
-                    },
-                    ensure_ascii=False,
-                ),
-            },
-        ]
-        try:
-            parsed = await self._generate_json(messages)
-            intent = str(parsed.get("intent", "unclear")).strip().lower()
-            if intent not in {
-                "new_booking",
-                "track_booking",
-                "business_info",
-                "pricing_info",
-                "transfer_request",
-                "end_call",
-                "unclear",
-            }:
-                intent = "unclear"
-            return {
-                "intent": intent,
-                "booking_id": str(parsed.get("booking_id", "")).strip(),
-                "confidence": str(parsed.get("confidence", "medium")).strip().lower() or "medium",
-            }
-        except Exception:  # noqa: BLE001
-            return self._heuristic_intent(user_input)
-
-    async def analyze_turn(
-        self,
-        question: str,
-        user_input: str,
-        collected_answers: dict[str, str],
-        question_meta: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        prompt = (
-            "You route one caller turn during intake. Return strict JSON with keys: "
-            "intent, extracted_answer, assistant_reply, normalized_answer. "
-            "intent must be one of: answer, info_request, unclear, off_topic, cancel. "
-            "Use answer only if user answered the current intake question. "
-            "If caller asks a side question, use info_request and provide short assistant_reply. "
-            "If caller response is unrelated/noise, use off_topic."
-        )
-        messages = [
-            {"role": "system", "content": prompt},
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "question": question,
-                        "question_meta": question_meta or {},
-                        "user_input": user_input,
-                        "collected_answers": collected_answers,
-                    },
-                    ensure_ascii=False,
-                ),
-            },
-        ]
-        try:
-            parsed = await self._generate_json(messages)
-            intent = str(parsed.get("intent", "unclear")).strip().lower()
-            if intent not in {"answer", "info_request", "unclear", "off_topic", "cancel"}:
-                intent = "unclear"
-            return {
-                "intent": intent,
-                "extracted_answer": str(parsed.get("extracted_answer", "")).strip(),
-                "normalized_answer": str(parsed.get("normalized_answer", "")).strip(),
-                "assistant_reply": str(parsed.get("assistant_reply", "")).strip(),
-            }
-        except Exception:  # noqa: BLE001
-            cleaned = user_input.strip()
-            if cleaned.lower() in {"cancel", "stop", "hang up", "end call"}:
-                return {
-                    "intent": "cancel",
-                    "extracted_answer": "",
-                    "normalized_answer": "",
-                    "assistant_reply": "Understood. I can end the call now.",
-                }
-            if len(cleaned) < 2:
-                return {
-                    "intent": "unclear",
-                    "extracted_answer": "",
-                    "normalized_answer": "",
-                    "assistant_reply": "Could you please repeat that a bit more clearly?",
-                }
-            return {
-                "intent": "answer",
-                "extracted_answer": cleaned,
-                "normalized_answer": cleaned,
-                "assistant_reply": "",
-            }
+    # ── Language detection ───────────────────────────────────────
 
     async def detect_language_preference(
         self,
@@ -152,11 +295,12 @@ class OpenAIClient:
         supported_languages: list[str],
         default_language: str,
     ) -> str:
+        """Detect caller's language preference."""
         prompt = (
             "Return strict JSON with key language. Choose only one code from supported_languages. "
             "Detect language from user text and explicit requests like 'speak in English'."
         )
-        messages = [
+        messages: list[dict[str, Any]] = [
             {"role": "system", "content": prompt},
             {
                 "role": "user",
@@ -171,13 +315,22 @@ class OpenAIClient:
             },
         ]
         try:
-            parsed = await self._generate_json(messages)
+            completion = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=0,
+                max_tokens=50,
+                response_format={"type": "json_object"},
+            )
+            raw = completion.choices[0].message.content or "{}"
+            parsed = json.loads(raw)
             detected = str(parsed.get("language", default_language)).strip().lower()
             if detected in supported_languages:
                 return detected
         except Exception:  # noqa: BLE001
             pass
 
+        # Heuristic fallbacks
         if re.search(r"\benglish\b", user_input.lower()):
             return "en" if "en" in supported_languages else default_language
         if re.search(r"\barabic\b", user_input.lower()) and "ar" in supported_languages:
@@ -187,40 +340,16 @@ class OpenAIClient:
         return default_language
 
     async def rewrite_confirmation(self, text: str, caller_language_hint: str = "en") -> str:
+        """Rewrite a confirmation message for a natural phone call."""
         prompt = (
             "Rewrite this confirmation for phone call speech. Keep it short, clear, and human. "
             "Do not add any facts."
         )
-        messages = [
+        messages: list[dict[str, str]] = [
             {"role": "system", "content": prompt},
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {"language": caller_language_hint, "text": text},
-                    ensure_ascii=False,
-                ),
-            },
+            {"role": "user", "content": json.dumps({"language": caller_language_hint, "text": text}, ensure_ascii=False)},
         ]
         try:
             return await self.generate_reply(messages)
         except Exception:  # noqa: BLE001
             return text
-
-    def _heuristic_intent(self, user_input: str) -> dict[str, str]:
-        text = user_input.lower().strip()
-        booking_id_match = re.search(r"\b([a-z]{2,}-\d{4,})\b", text)
-        booking_id = booking_id_match.group(1).upper() if booking_id_match else ""
-
-        if any(word in text for word in ["bye", "goodbye", "end call", "hang up", "thank you bye"]):
-            return {"intent": "end_call", "booking_id": booking_id, "confidence": "high"}
-        if any(word in text for word in ["track", "booking status", "booking id", "reschedule", "cancel booking"]):
-            return {"intent": "track_booking", "booking_id": booking_id, "confidence": "high"}
-        if any(word in text for word in ["transfer", "human", "agent", "representative"]):
-            return {"intent": "transfer_request", "booking_id": booking_id, "confidence": "medium"}
-        if any(word in text for word in ["price", "pricing", "cost", "rate", "quote"]):
-            return {"intent": "pricing_info", "booking_id": booking_id, "confidence": "medium"}
-        if any(word in text for word in ["service", "services", "business", "about", "company"]):
-            return {"intent": "business_info", "booking_id": booking_id, "confidence": "medium"}
-        if any(word in text for word in ["book", "appointment", "visit", "need service"]):
-            return {"intent": "new_booking", "booking_id": booking_id, "confidence": "medium"}
-        return {"intent": "unclear", "booking_id": booking_id, "confidence": "low"}
