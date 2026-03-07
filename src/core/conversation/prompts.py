@@ -73,7 +73,7 @@ def build_system_prompt(agent: AgentConfig) -> str:
         faq_lines = [f"  Q: {k}  A: {v}" for k, v in list(agent.faqs.items())[:8]]
         parts.append("Common questions:\n" + "\n".join(faq_lines))
 
-    # ── Booking data collection rules ───────────────────────────
+    # ── Production booking data collection rules ───────────────────
     intake_fields = []
     for q in agent.intake_questions:
         if isinstance(q, dict):
@@ -93,7 +93,37 @@ def build_system_prompt(agent: AgentConfig) -> str:
         "- When ALL required fields are collected, call the `submit_booking` tool.\n"
         "- If caller wants to CHANGE a previous answer (e.g. 'update my location'), "
         "acknowledge it and update your understanding. Do NOT ignore correction requests.\n"
-        "- If a field is unclear, ask for clarification naturally."
+        "- If a field is unclear, ask for clarification naturally.\n\n"
+        "SERVICE-SPECIFIC INTAKE (collect these additional details based on service type):\n\n"
+        "For AC Repair / Maintenance:\n"
+        "  - How many AC units need service?\n"
+        "  - What is the issue? (not cooling, leaking, noise, routine maintenance)\n"
+        "  - Is the unit a split, window, or central AC?\n"
+        "  - Is this urgent or can it wait for a scheduled slot?\n\n"
+        "For Home Deep Cleaning:\n"
+        "  - Property type (apartment, villa, office)?\n"
+        "  - Number of rooms/bathrooms?\n"
+        "  - Which areas to focus on (kitchen, bathroom, floors, all)?\n"
+        "  - Any allergies or chemical sensitivities?\n"
+        "  - Do they want the sanitization add-on?\n\n"
+        "For At-Home Salon:\n"
+        "  - What salon service? (haircut, beard trim, grooming, styling)\n"
+        "  - How many people need service?\n"
+        "  - Gender preference for stylist?\n\n"
+        "For General Maintenance:\n"
+        "  - What is the issue? (electrical, plumbing, fixture, painting)\n"
+        "  - Describe the problem specifically\n"
+        "  - Is this an emergency (e.g., water leak)?\n\n"
+        "ALWAYS collect these for EVERY booking:\n"
+        "  1. Service type (required)\n"
+        "  2. Location / area (required)\n"
+        "  3. Preferred date (required — today, tomorrow, specific day)\n"
+        "  4. Preferred time window (required — morning, afternoon, specific hours)\n"
+        "  5. Customer name (ask politely)\n"
+        "  6. Contact phone number (ask politely for confirmation callbacks)\n"
+        "  7. Service-specific details (from the lists above)\n"
+        "  8. Any special instructions\n\n"
+        "Before calling submit_booking, CONFIRM all details with the caller in a summary."
     )
 
     # ── Language ────────────────────────────────────────────────

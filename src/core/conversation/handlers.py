@@ -51,7 +51,9 @@ async def _handle_submit_booking(
     service_type = args.get("service_type", "")
     location = args.get("location", "")
     preferred_time = args.get("preferred_time", "")
+    preferred_date = args.get("preferred_date", "")
     customer_name = args.get("customer_name", "")
+    customer_phone = args.get("customer_phone", "")
 
     # Validate coverage
     if agent_config.coverage_areas:
@@ -82,13 +84,33 @@ async def _handle_submit_booking(
                     matched_service = svc.name
                     break
 
-    answers = {
+    # Build comprehensive booking answers
+    answers: dict[str, Any] = {
         "service_type": matched_service,
         "location": location,
+        "preferred_date": preferred_date,
         "preferred_time": preferred_time,
     }
+    # Customer info
     if customer_name:
         answers["customer_name"] = customer_name
+    if customer_phone:
+        answers["customer_phone"] = customer_phone
+    # Service-specific details
+    if args.get("property_type"):
+        answers["property_type"] = args["property_type"]
+    if args.get("num_rooms"):
+        answers["num_rooms"] = args["num_rooms"]
+    if args.get("specific_areas"):
+        answers["specific_areas"] = args["specific_areas"]
+    if args.get("allergy_info"):
+        answers["allergy_info"] = args["allergy_info"]
+    if args.get("issue_description"):
+        answers["issue_description"] = args["issue_description"]
+    if args.get("urgency"):
+        answers["urgency"] = args["urgency"]
+    if args.get("special_instructions"):
+        answers["special_instructions"] = args["special_instructions"]
 
     try:
         result = await backend_client.book_service(
@@ -111,6 +133,7 @@ async def _handle_submit_booking(
             "message": result.get("message", "Booking confirmed."),
             "service": matched_service,
             "location": location,
+            "date": preferred_date,
             "time": preferred_time,
         }
 

@@ -471,6 +471,7 @@ class BackendClient:
         )
         location_answer = answers.get("location") or answers.get("q1") or ""
         time_answer = answers.get("preferred_time") or answers.get("q2") or ""
+        date_answer = answers.get("preferred_date") or ""
 
         matched = self._find_service_in_catalog(service_answer, agent)
         booking_ref = f"DUMMY-{int(time.time())}"
@@ -488,21 +489,56 @@ class BackendClient:
 
         short_booking_id = re.sub(r"\D", "", booking_ref)[-5:] or re.sub(r"\D", "", booking_ref)
 
-        payload = {
-            "status": "mock_confirmed",
+        # Build comprehensive booking record
+        payload: dict[str, Any] = {
+            "status": "confirmed",
             "booking_ref": booking_ref,
             "short_booking_id": short_booking_id,
+            "agent_id": agent_id,
             "service_name": matched.get("name"),
             "service_id": matched.get("service_id"),
             "location": location_answer,
+            "preferred_date": date_answer,
             "preferred_time": time_answer,
             "price_range": matched.get("base_price_bhd"),
-            "message": (
-                f"Booking {booking_ref} is created for {matched.get('name')} in {location_answer} at {time_answer}. "
-                f"Short ID is {short_booking_id}. Our operations team will confirm final timing and quote shortly."
-            ),
-            "answers": answers,
+            "created_at": time.time(),
         }
+
+        # Customer info
+        if answers.get("customer_name"):
+            payload["customer_name"] = answers["customer_name"]
+        if answers.get("customer_phone"):
+            payload["customer_phone"] = answers["customer_phone"]
+
+        # Service-specific details
+        if answers.get("property_type"):
+            payload["property_type"] = answers["property_type"]
+        if answers.get("num_rooms"):
+            payload["num_rooms"] = answers["num_rooms"]
+        if answers.get("specific_areas"):
+            payload["specific_areas"] = answers["specific_areas"]
+        if answers.get("allergy_info"):
+            payload["allergy_info"] = answers["allergy_info"]
+        if answers.get("issue_description"):
+            payload["issue_description"] = answers["issue_description"]
+        if answers.get("urgency"):
+            payload["urgency"] = answers["urgency"]
+        if answers.get("special_instructions"):
+            payload["special_instructions"] = answers["special_instructions"]
+
+        # Build confirmation message
+        date_str = f" on {date_answer}" if date_answer else ""
+        time_str = f" at {time_answer}" if time_answer else ""
+        location_str = f" in {location_answer}" if location_answer else ""
+
+        payload["message"] = (
+            f"Booking {booking_ref} is confirmed for {matched.get('name')}"
+            f"{location_str}{date_str}{time_str}. "
+            f"Your booking reference is {short_booking_id}. "
+            f"Our operations team will confirm final timing and quote shortly."
+        )
+        payload["answers"] = answers
+
         self._runtime_bookings[booking_ref] = payload
         if short_booking_id:
             self._runtime_bookings[short_booking_id] = payload

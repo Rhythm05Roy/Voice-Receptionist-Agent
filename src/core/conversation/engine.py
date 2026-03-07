@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from typing import Any, Protocol
 
 from loguru import logger
@@ -23,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from src.api.exceptions import ConversationEngineError
 from src.core.services.backend_client import BackendClient
+from src.core.services.call_store import CallStore
 from src.core.services.elevenlabs import ElevenLabsClient
 from src.core.services.openai import OpenAIClient
 
@@ -33,9 +35,11 @@ from .handlers import execute_tool_call
 class CallSession(BaseModel):
     call_id: str
     agent_config: Any  # AgentConfig
+    agent_id: str = ""
     preferred_language: str | None = None
     created_at: float = Field(default_factory=time.monotonic)
     last_activity: float = Field(default_factory=time.monotonic)
+    is_test: bool = False
 
     # Full conversation history (role-tagged messages for LLM)
     conversation_history: list[dict[str, Any]] = Field(default_factory=list)
@@ -119,17 +123,24 @@ class ConversationEngine:
         tts_client: ElevenLabsClient,
         environment: str = "development",
         session_manager: CallSessionManager | None = None,
+        call_store: CallStore | None = None,
     ):
         self.backend_client = backend_client
         self.llm_client = llm_client
         self.tts_client = tts_client
+        self.call_store = call_store or CallStore()
         self.environment = environment
         self.sessions = session_manager or CallSessionManager()
 
     async def has_session(self, call_id: str) -> bool:
         return (await self.sessions.get(call_id)) is not None
 
-    async def start_session(self, call_id: str, agent_id: str | None = None) -> dict[str, str]:
+    async def start_session(
+        self,
+        call_id: str,
+        agent_id: str | None = None,
+        is_test: bool = False,
+    ) -> dict[str, str]:
         """Create a new call session and return the greeting."""
         agent_config = await self.backend_client.fetch_agent_config(agent_id)
         preferred_language = agent_config.default_greeting_language or agent_config.language or "en"
@@ -140,6 +151,8 @@ class ConversationEngine:
         session = CallSession(
             call_id=call_id,
             agent_config=agent_config,
+            agent_id=agent_config.agent_id,
+            is_test=is_test,
             preferred_language=preferred_language.lower(),
             system_prompt=system_prompt,
         )
@@ -268,32 +281,46 @@ class ConversationEngine:
                 final_action = "transfer"
                 transfer_number = tool_output.get("transfer_number")
 
+        # ── Persist tool calls + results into conversation history ──
+        # This is CRITICAL: without this, the LLM forgets bookings and
+        # re-calls submit_booking when the user asks to repeat info.
+        raw_message = result.get("raw_message")
+        assistant_msg: dict[str, Any] = {"role": "assistant"}
+        if response_text:
+            assistant_msg["content"] = response_text
+        else:
+            assistant_msg["content"] = None
+
+        if raw_message and hasattr(raw_message, "tool_calls") and raw_message.tool_calls:
+            assistant_msg["tool_calls"] = [
+                {
+                    "id": tc_raw.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc_raw.function.name,
+                        "arguments": tc_raw.function.arguments,
+                    },
+                }
+                for tc_raw in raw_message.tool_calls
+            ]
+
+        # Add assistant message with tool calls to history
+        session.conversation_history.append(assistant_msg)
+
+        # Add each tool result to history
+        for tr in tool_results:
+            import json as _json
+            session.conversation_history.append({
+                "role": "tool",
+                "tool_call_id": tr["tool_call_id"],
+                "content": _json.dumps(tr["output"]),
+            })
+
         # Send tool results back to GPT for natural follow-up
         try:
-            raw_message = result.get("raw_message")
-            # Serialize assistant message with tool calls
-            assistant_msg: dict[str, Any] = {"role": "assistant"}
-            if response_text:
-                assistant_msg["content"] = response_text
-            else:
-                assistant_msg["content"] = None
-
-            if raw_message and hasattr(raw_message, "tool_calls") and raw_message.tool_calls:
-                assistant_msg["tool_calls"] = [
-                    {
-                        "id": tc_raw.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc_raw.function.name,
-                            "arguments": tc_raw.function.arguments,
-                        },
-                    }
-                    for tc_raw in raw_message.tool_calls
-                ]
-
             follow_up = await self.llm_client.continue_after_tool(
                 system_prompt=session.system_prompt,
-                conversation_history=session.conversation_history[:-1],
+                conversation_history=session.conversation_history[:-len(tool_results) - 1],
                 tool_call_message=assistant_msg,
                 tool_results=tool_results,
             )
@@ -314,6 +341,31 @@ class ConversationEngine:
         }
 
     async def end_call(self, call_id: str) -> None:
+        session = await self.sessions.get(call_id)
+        if session:
+            # Determine outcome from last action
+            outcome = "completed"
+            last_state = session.state
+            if last_state.get("transferred"):
+                outcome = "transferred"
+
+            # Log to call store for analytics
+            self.call_store.start_call(
+                call_id=call_id,
+                agent_id=session.agent_id,
+                is_test=session.is_test,
+            )
+            self.call_store.end_call(
+                call_id=call_id,
+                outcome=outcome,
+                transcript=[
+                    {"role": m.get("role", ""), "content": m.get("content", "")}
+                    for m in session.conversation_history
+                    if m.get("content")
+                ],
+                turn_count=session.turn_count,
+            )
+
         await self.sessions.delete(call_id)
         logger.bind(call_id=call_id).info("Session ended")
 

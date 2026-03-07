@@ -30,8 +30,10 @@ TOOLS: list[dict[str, Any]] = [
         "function": {
             "name": "submit_booking",
             "description": (
-                "Submit a booking request.  Call ONLY when ALL required fields "
-                "have been naturally collected and confirmed with the caller."
+                "Submit a booking request. Call ONLY when ALL required fields "
+                "have been naturally collected and confirmed with the caller. "
+                "Required: service_type, location, preferred_date, preferred_time. "
+                "Also collect customer_name, customer_phone, and any service-specific details."
             ),
             "parameters": {
                 "type": "object",
@@ -44,13 +46,51 @@ TOOLS: list[dict[str, Any]] = [
                         "type": "string",
                         "description": "Caller's area / city for the service visit.",
                     },
+                    "preferred_date": {
+                        "type": "string",
+                        "description": "Date for the visit (e.g. 'tomorrow', 'March 10', 'next Monday').",
+                    },
                     "preferred_time": {
                         "type": "string",
-                        "description": "When the caller wants the visit (e.g. 'tomorrow 2 PM').",
+                        "description": "Preferred time window (e.g. '2 PM - 4 PM', 'morning', '12pm to 2pm').",
                     },
                     "customer_name": {
                         "type": "string",
-                        "description": "Caller's name if provided.",
+                        "description": "Caller's full name.",
+                    },
+                    "customer_phone": {
+                        "type": "string",
+                        "description": "Caller's phone number for confirmation callbacks.",
+                    },
+                    "property_type": {
+                        "type": "string",
+                        "enum": ["apartment", "villa", "office", "shop", "other"],
+                        "description": "Type of property (for cleaning, maintenance, AC services).",
+                    },
+                    "num_rooms": {
+                        "type": "integer",
+                        "description": "Number of rooms (for cleaning/maintenance services).",
+                    },
+                    "specific_areas": {
+                        "type": "string",
+                        "description": "Specific areas to focus on (e.g. 'kitchen and bathrooms', 'living room AC unit').",
+                    },
+                    "allergy_info": {
+                        "type": "string",
+                        "description": "Allergies or chemical sensitivities to consider (e.g. 'dust allergy', 'no bleach').",
+                    },
+                    "issue_description": {
+                        "type": "string",
+                        "description": "Detailed description of issue for repair/maintenance (e.g. 'AC not cooling', 'leaking faucet').",
+                    },
+                    "urgency": {
+                        "type": "string",
+                        "enum": ["normal", "urgent", "emergency"],
+                        "description": "Urgency level. Use 'urgent' if same-day, 'emergency' for immediate needs.",
+                    },
+                    "special_instructions": {
+                        "type": "string",
+                        "description": "Any special instructions (e.g. 'ring doorbell twice', 'call on arrival', 'bring eco-friendly products').",
                     },
                 },
                 "required": ["service_type", "location", "preferred_time"],
@@ -121,6 +161,11 @@ class OpenAIClient:
     def __init__(self, api_key: str, model: str = "gpt-4o"):
         self.client = AsyncOpenAI(api_key=api_key)
         self.model = model
+        self.fast_model = "gpt-4o-mini"  # ~60% faster for simple turns
+
+    def _select_model(self, needs_tools: bool = True) -> str:
+        """Smart model routing — fast model for simple turns, full model for tool calls."""
+        return self.model if needs_tools else self.fast_model
 
     # ── Primary conversation method ──────────────────────────────
 

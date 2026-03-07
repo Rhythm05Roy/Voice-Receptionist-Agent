@@ -76,14 +76,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--record-seconds",
         type=float,
-        default=12.0,
+        default=30.0,
         help="Maximum utterance duration in seconds (legacy arg, now dynamic end-of-speech).",
     )
     parser.add_argument("--input-rate", type=int, default=16000)
-    parser.add_argument("--output-rate", type=int, default=24000)
-    parser.add_argument("--silence-seconds", type=float, default=0.9)
-    parser.add_argument("--min-utterance-seconds", type=float, default=0.6)
-    parser.add_argument("--start-timeout-seconds", type=float, default=8.0)
+    parser.add_argument("--output-rate", type=int, default=16000)
+    parser.add_argument("--silence-seconds", type=float, default=1.3)
+    parser.add_argument("--min-utterance-seconds", type=float, default=0.5)
+    parser.add_argument("--start-timeout-seconds", type=float, default=15.0)
     parser.add_argument("--energy-threshold", type=float, default=450.0)
     parser.add_argument(
         "--barge-in",
@@ -175,6 +175,13 @@ def _transcribe(openai_client: OpenAI, wav_bytes: bytes) -> str:
     result = openai_client.audio.transcriptions.create(
         model="whisper-1",
         file=bio,
+        language="en",
+        prompt=(
+            "This is a phone call about booking home services like "
+            "AC repair, deep cleaning, salon services, and maintenance. "
+            "Common words: booking, service, Bahrain, Manama, Riffa, "
+            "Muharraq, allergy, appointment, schedule, time, location."
+        ),
     )
     return (result.text or "").strip()
 
@@ -193,9 +200,9 @@ def _elevenlabs_pcm(
     }
     payload: dict[str, Any] = {
         "text": text,
-        "model_id": "eleven_multilingual_v2",
+        "model_id": "eleven_turbo_v2_5",  # ~50% faster than multilingual_v2
     }
-    resp = httpx.post(url, headers=headers, json=payload, timeout=60)
+    resp = httpx.post(url, headers=headers, json=payload, timeout=30)
     resp.raise_for_status()
     return resp.content
 
@@ -321,6 +328,10 @@ def main() -> int:
         talk_texts, has_listen, has_hangup = _extract_actions(ncco)
 
         if has_hangup:
+            # Speak farewell text BEFORE hanging up
+            for text in talk_texts:
+                if text.strip():
+                    _speak_blocking(text, api_key=eleven_key, voice_id=eleven_voice_id, sample_rate=args.output_rate)
             print("call ended by agent")
             return 0
 
