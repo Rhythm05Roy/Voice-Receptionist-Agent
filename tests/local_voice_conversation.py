@@ -115,14 +115,25 @@ def _capture_until_silence(
 ) -> tuple[bytes | None, bool]:
     chunk_seconds = 0.05
     blocksize = max(1, int(sample_rate * chunk_seconds))
-    silence_chunks_required = max(1, int(silence_seconds / chunk_seconds))
     min_chunks_required = max(1, int(min_seconds / chunk_seconds))
     max_chunks = max(min_chunks_required, int(max_seconds / chunk_seconds))
     start_timeout_chunks = max(1, int(start_timeout_seconds / chunk_seconds))
 
+    # Adaptive silence thresholds (in chunks)
+    # Short speech (< 2s): use base silence_seconds
+    # Medium speech (2-5s): need 2.0s of silence to end
+    # Long speech (> 5s): need 2.5s of silence to end
+    base_silence_chunks = max(1, int(silence_seconds / chunk_seconds))
+    medium_silence_chunks = max(1, int(2.0 / chunk_seconds))
+    long_silence_chunks = max(1, int(2.5 / chunk_seconds))
+
+    short_speech_threshold = int(2.0 / chunk_seconds)  # 2 seconds of speech
+    long_speech_threshold = int(5.0 / chunk_seconds)    # 5 seconds of speech
+
     collected: list[np.ndarray] = []
     speech_started = False
     silent_chunks = 0
+    speech_chunks = 0  # tracks actual speech (non-silent) chunks
     waited_chunks = 0
     barge_in_triggered = False
 
@@ -140,6 +151,7 @@ def _capture_until_silence(
                         playback.stop()
                         barge_in_triggered = True
                     collected.append(mono.copy())
+                    speech_chunks += 1
                     silent_chunks = 0
                     continue
 
@@ -154,12 +166,22 @@ def _capture_until_silence(
             collected.append(mono.copy())
             if is_speech:
                 silent_chunks = 0
+                speech_chunks += 1
             else:
                 silent_chunks += 1
 
             if len(collected) >= max_chunks:
                 break
-            if len(collected) >= min_chunks_required and silent_chunks >= silence_chunks_required:
+
+            # Adaptive silence threshold based on how much speech we've heard
+            if speech_chunks >= long_speech_threshold:
+                required_silence = long_silence_chunks
+            elif speech_chunks >= short_speech_threshold:
+                required_silence = medium_silence_chunks
+            else:
+                required_silence = base_silence_chunks
+
+            if len(collected) >= min_chunks_required and silent_chunks >= required_silence:
                 break
 
     if not collected:
