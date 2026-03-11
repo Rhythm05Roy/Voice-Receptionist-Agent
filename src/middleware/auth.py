@@ -17,6 +17,7 @@ _BYPASS_PREFIXES = (
     "/redoc",
     "/openapi.json",
     "/api/v1/telephony/webhook",
+    "/api/v1/twilio/webhook",
 )
 
 

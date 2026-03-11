@@ -19,6 +19,8 @@ tenacity = "^8.2.3"
 openai = "^1.12.0"
 anthropic = "^0.21.3"
 python-dotenv = "^1.0.1"
+python-multipart = "^0.0.9"
+twilio = "^9.0.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.2"

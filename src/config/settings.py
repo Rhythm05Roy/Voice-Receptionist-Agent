@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     twilio_auth_token: str = Field(default="", alias="TWILIO_AUTH_TOKEN")
     twilio_phone_number: str = Field(default="", alias="TWILIO_PHONE_NUMBER")
     twilio_websocket_url: str = Field(default="", alias="TWILIO_WEBSOCKET_URL")
+    public_base_url: str = Field(default="", alias="PUBLIC_BASE_URL")
+    twilio_validate_signature: bool = Field(default=False, alias="TWILIO_VALIDATE_SIGNATURE")
 
     # Legacy Vonage settings (kept for backward compat)
     vonage_api_key: str = Field(default="dev-vonage-key", alias="VONAGE_API_KEY")

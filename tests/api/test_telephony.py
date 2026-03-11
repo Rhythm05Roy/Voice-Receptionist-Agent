@@ -1,4 +1,5 @@
 ﻿from src.api import deps
+from src.core.services.twilio_client import TwilioClient
 
 
 class _FakeEngine:
@@ -24,6 +25,7 @@ class _FakeEngine:
 
 class _FakeVonage:
     """Backward-compat fake that works with both Vonage and Twilio NCCO bridge."""
+
     def build_talk_ncco(self, text: str, voice_name: str | None = None):
         return [{"action": "talk", "text": text, "voiceName": voice_name or "Polly.Joanna"}]
 
@@ -44,12 +46,35 @@ class _FakeBackend:
         return "default"
 
 
+class _FakeSettings:
+    def __init__(self, validate_signature: bool = False):
+        self.public_base_url = ""
+        self.twilio_validate_signature = validate_signature
+        self.twilio_auth_token = "test-token"
+
+
 def _overrides(client, engine):
     client.app.dependency_overrides.update(
         {
             deps.get_conversation_engine: lambda: engine,
             deps.get_vonage_client: lambda: _FakeVonage(),
             deps.get_backend_client: lambda: _FakeBackend(),
+            deps.rate_limit_webhook: lambda: None,
+        }
+    )
+
+
+def _twilio_overrides(client, engine, validate_signature: bool = False):
+    client.app.dependency_overrides.update(
+        {
+            deps.get_conversation_engine: lambda: engine,
+            deps.get_twilio_client: lambda: TwilioClient(
+                account_sid="AC123",
+                auth_token="test-token",
+                phone_number="+10000000000",
+            ),
+            deps.get_backend_client: lambda: _FakeBackend(),
+            deps.get_settings_dep: lambda: _FakeSettings(validate_signature=validate_signature),
             deps.rate_limit_webhook: lambda: None,
         }
     )
@@ -116,5 +141,67 @@ def test_event_webhook_ends_call_on_terminal_status(client):
     response = client.post("/api/v1/telephony/webhook/event", json={"uuid": "abc", "status": "completed"})
     assert response.status_code == 200
     assert "abc" in engine.ended
+
+    client.app.dependency_overrides.clear()
+
+
+def test_twilio_incoming_greets_on_first_call(client):
+    engine = _FakeEngine()
+    _twilio_overrides(client, engine)
+
+    response = client.post(
+        "/api/v1/twilio/webhook/incoming",
+        data={
+            "CallSid": "CA111",
+            "From": "+10000000001",
+            "To": "+10000000002",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "<Gather" in response.text
+    assert "hello" in response.text
+
+    client.app.dependency_overrides.clear()
+
+
+def test_twilio_incoming_processes_speech(client):
+    engine = _FakeEngine()
+    engine._sessions.add("CA222")
+    _twilio_overrides(client, engine)
+
+    response = client.post(
+        "/api/v1/twilio/webhook/incoming",
+        data={
+            "CallSid": "CA222",
+            "From": "+10000000001",
+            "To": "+10000000002",
+            "SpeechResult": "need cleaning",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "echo need cleaning" in response.text
+    assert "<Gather" in response.text
+
+    client.app.dependency_overrides.clear()
+
+
+def test_twilio_incoming_rejects_invalid_signature_when_enabled(client):
+    engine = _FakeEngine()
+    _twilio_overrides(client, engine, validate_signature=True)
+
+    response = client.post(
+        "/api/v1/twilio/webhook/incoming",
+        data={
+            "CallSid": "CA333",
+            "From": "+10000000001",
+            "To": "+10000000002",
+        },
+        headers={"X-Twilio-Signature": "invalid-signature"},
+    )
+
+    assert response.status_code == 403
+    assert "Invalid Twilio signature" in response.text
 
     client.app.dependency_overrides.clear()
