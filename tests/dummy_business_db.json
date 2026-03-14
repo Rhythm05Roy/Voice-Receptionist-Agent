@@ -784,6 +784,62 @@
         "property_type": "apartment",
         "specific_areas": "haircut"
       }
+    },
+    "DUMMY-1773296711": {
+      "status": "confirmed",
+      "booking_ref": "DUMMY-1773296711",
+      "short_booking_id": "96711",
+      "agent_id": "default",
+      "service_name": "AC Repair and Maintenance",
+      "service_id": "ac_repair",
+      "location": "Riffa",
+      "preferred_date": "this Friday",
+      "preferred_time": "afternoon",
+      "price_range": "10-35 BHD",
+      "created_at": 1773296711.049308,
+      "customer_name": "Ritam Roy",
+      "customer_phone": "0171722",
+      "issue_description": "Indoor unit dropping water",
+      "urgency": "normal",
+      "message": "Booking DUMMY-1773296711 is confirmed for AC Repair and Maintenance in Riffa on this Friday at afternoon. Your booking reference is 96711. Our operations team will confirm final timing and quote shortly.",
+      "answers": {
+        "service_type": "AC Repair and Maintenance",
+        "location": "Riffa",
+        "preferred_date": "this Friday",
+        "preferred_time": "afternoon",
+        "customer_name": "Ritam Roy",
+        "customer_phone": "0171722",
+        "issue_description": "Indoor unit dropping water",
+        "urgency": "normal"
+      }
+    },
+    "96711": {
+      "status": "confirmed",
+      "booking_ref": "DUMMY-1773296711",
+      "short_booking_id": "96711",
+      "agent_id": "default",
+      "service_name": "AC Repair and Maintenance",
+      "service_id": "ac_repair",
+      "location": "Riffa",
+      "preferred_date": "this Friday",
+      "preferred_time": "afternoon",
+      "price_range": "10-35 BHD",
+      "created_at": 1773296711.049308,
+      "customer_name": "Ritam Roy",
+      "customer_phone": "0171722",
+      "issue_description": "Indoor unit dropping water",
+      "urgency": "normal",
+      "message": "Booking DUMMY-1773296711 is confirmed for AC Repair and Maintenance in Riffa on this Friday at afternoon. Your booking reference is 96711. Our operations team will confirm final timing and quote shortly.",
+      "answers": {
+        "service_type": "AC Repair and Maintenance",
+        "location": "Riffa",
+        "preferred_date": "this Friday",
+        "preferred_time": "afternoon",
+        "customer_name": "Ritam Roy",
+        "customer_phone": "0171722",
+        "issue_description": "Indoor unit dropping water",
+        "urgency": "normal"
+      }
     }
   },
   "phone_routing": {
