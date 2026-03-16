@@ -7,6 +7,8 @@ from src.core.types import AgentConfig
 
 class _Backend:
     def __init__(self):
+        self.business_name = "Bahrain HomeCare Group"
+        self.greeting = "Hello, this is Bahrain HomeCare Group. How can I help you today?"
         self._bookings: dict[str, dict[str, str]] = {
             "DUMMY-10001": {
                 "status": "scheduled",
@@ -23,8 +25,8 @@ class _Backend:
     async def fetch_agent_config(self, agent_id=None):
         return AgentConfig(
             agent_id="default",
-            business_name="Bahrain HomeCare Group",
-            greeting="Hello, this is Bahrain HomeCare Group. How can I help you today?",
+            business_name=self.business_name,
+            greeting=self.greeting,
             language="en",
             default_greeting_language="en",
             supported_languages=["en", "ar"],
@@ -248,6 +250,7 @@ def _make_engine() -> tuple[ConversationEngine, _Backend, _LLM]:
         tts_client=tts,
         environment="test",
         session_manager=session_mgr,
+        context_refresh_ttl_seconds=60,
     )
     return engine, backend, llm
 
@@ -269,6 +272,19 @@ def test_general_conversation():
     result = asyncio.run(engine.process_user_input("call-002", "What services do you offer?"))
     assert result["action"] == "speak"
     assert result["text_to_speak"]  # Should have a response
+    assert "AC Repair and Maintenance" in result["text_to_speak"]
+    assert "Home Deep Cleaning" in result["text_to_speak"]
+
+
+def test_business_info_query_uses_deterministic_context():
+    engine, _, llm = _make_engine()
+    asyncio.run(engine.start_session("call-002b"))
+    result = asyncio.run(engine.process_user_input("call-002b", "Tell me about your pricing and business hours"))
+
+    assert result["action"] == "speak"
+    assert "Pricing depends" in result["text_to_speak"] or "Current pricing includes" in result["text_to_speak"]
+    assert "hours" in result["text_to_speak"].lower()
+    assert llm.call_count == 0
 
 
 # ── Test: booking triggers submit_booking tool ───────────────────
@@ -343,3 +359,25 @@ def test_end_call_clears_session():
     asyncio.run(engine.start_session("call-008"))
     asyncio.run(engine.end_call("call-008"))
     assert not asyncio.run(engine.has_session("call-008"))
+
+
+def test_session_context_refreshes_after_ttl():
+    engine, backend, _ = _make_engine()
+    engine.context_refresh_ttl_seconds = 1
+
+    asyncio.run(engine.start_session("call-009"))
+    session = asyncio.run(engine.sessions.get("call-009"))
+    assert session is not None
+    assert session.agent_config.business_name == "Bahrain HomeCare Group"
+
+    backend.business_name = "Urban Glow Salon"
+    backend.greeting = "Hello, thank you for calling Urban Glow Salon. How can I help you today?"
+    session.context_updated_at -= 5
+    asyncio.run(engine.sessions.save(session))
+
+    asyncio.run(engine.process_user_input("call-009", "What services do you offer?"))
+
+    refreshed = asyncio.run(engine.sessions.get("call-009"))
+    assert refreshed is not None
+    assert refreshed.agent_config.business_name == "Urban Glow Salon"
+    assert "Urban Glow Salon" in refreshed.system_prompt

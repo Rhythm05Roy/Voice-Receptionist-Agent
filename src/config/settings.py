@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     vonage_private_key: str = Field(default="dev-vonage-private-key", alias="VONAGE_PRIVATE_KEY")
 
     request_timeout: int = Field(default=15, description="HTTP client timeout seconds", alias="REQUEST_TIMEOUT")
+    context_refresh_ttl_seconds: int = Field(default=60, alias="CONTEXT_REFRESH_TTL_SECONDS")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     local_test_mode: bool = Field(default=False, alias="LOCAL_TEST_MODE")
 

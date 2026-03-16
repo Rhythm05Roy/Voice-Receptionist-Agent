@@ -83,6 +83,7 @@ async def lifespan(app: FastAPI):
         tts_client=tts_client,
         environment=settings.environment,
         session_manager=session_manager,
+        context_refresh_ttl_seconds=settings.context_refresh_ttl_seconds,
     )
     app.state.conversation_engine = engine
     logger.info("ConversationEngine initialized")

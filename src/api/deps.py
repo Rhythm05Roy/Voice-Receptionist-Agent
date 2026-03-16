@@ -104,6 +104,7 @@ def get_conversation_engine(request: Request) -> ConversationEngine:
         tts_client=tts_client,
         environment=settings.environment,
         session_manager=CallSessionManager(),
+        context_refresh_ttl_seconds=settings.context_refresh_ttl_seconds,
     )
     request.app.state.conversation_engine = engine
     return engine

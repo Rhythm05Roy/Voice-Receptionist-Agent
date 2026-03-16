@@ -121,3 +121,13 @@ async def call_status(
         await engine.end_call(CallSid)
         logger.bind(call_id=CallSid).info("Twilio call ended", status=status, duration=CallDuration)
     return {"status": status or "unknown"}
+
+
+@router.post("/webhook/diagnostic")
+async def diagnostic_call(
+    twilio_client: TwilioClient = Depends(get_twilio_client),
+) -> Response:
+    twiml = twilio_client.build_diagnostic_twiml(
+        "This is a Twilio diagnostic call. If you hear this message, call audio is working.",
+    )
+    return Response(content=twiml, media_type=TWIML_CONTENT_TYPE)

@@ -38,7 +38,10 @@ class BackendClient:
 
     @property
     def _headers(self) -> dict[str, str]:
-        return {"Authorization": f"Bearer {self.api_key}"}
+        api_key = (self.api_key or "").strip()
+        if not api_key or api_key in {"change-me", "dev-backend-key"}:
+            return {}
+        return {"Authorization": f"Bearer {api_key}"}
 
     def _ensure_circuit(self) -> None:
         if self.circuit_open_until and time.monotonic() < self.circuit_open_until:
@@ -63,6 +66,12 @@ class BackendClient:
             "example.com",
         }
         return self.local_test_mode or any(host in self.base_url for host in placeholder_hosts)
+
+    def _is_business_catalog_endpoint(self) -> bool:
+        return "/api/business/businesses" in self.base_url.lower()
+
+    def _business_catalog_url(self) -> str:
+        return self.base_url if self.base_url.endswith("/") else f"{self.base_url}/"
 
     def _dummy_db_path(self) -> Path:
         configured = os.getenv("DUMMY_DB_PATH", "").strip()
@@ -235,10 +244,10 @@ class BackendClient:
         stop=stop_after_attempt(3),
         before_sleep=before_sleep_log(logger, "WARNING"),
     )
-    async def _get(self, url: str) -> dict[str, Any]:
+    async def _get(self, url: str) -> Any:
         self._ensure_circuit()
         try:
-            response = await self.client.get(url, headers=self._headers)
+            response = await self.client.get(url, headers=self._headers, follow_redirects=True)
             response.raise_for_status()
             self._record_success()
             return response.json()
@@ -246,6 +255,202 @@ class BackendClient:
             self._record_failure()
             logger.exception("Backend GET failed", url=url)
             raise
+
+    @staticmethod
+    def _slug(value: str) -> str:
+        cleaned = re.sub(r"[^a-z0-9]+", "_", value.strip().lower())
+        return cleaned.strip("_") or "service"
+
+    @staticmethod
+    def _day_name(day_index: int) -> str:
+        mapping = {
+            0: "Mon",
+            1: "Tue",
+            2: "Wed",
+            3: "Thu",
+            4: "Fri",
+            5: "Sat",
+            6: "Sun",
+        }
+        return mapping.get(day_index, f"Day {day_index}")
+
+    @staticmethod
+    def _compact_time(value: str) -> str:
+        if not value:
+            return ""
+        parts = value.split(":")
+        if len(parts) >= 2:
+            return f"{parts[0]}:{parts[1]}"
+        return value
+
+    def _default_questions_for_business(self, business_type: str) -> list[dict[str, Any]]:
+        is_salon = "salon" in business_type.lower() or "spa" in business_type.lower()
+        questions: list[dict[str, Any]] = [
+            {
+                "key": "service_type",
+                "question": "Which service would you like to book today?",
+                "answer_type": "text",
+                "required": True,
+            },
+            {
+                "key": "location",
+                "question": "What area are you located in?",
+                "answer_type": "text",
+                "required": True,
+            },
+            {
+                "key": "preferred_time",
+                "question": "What time works best for your appointment?",
+                "answer_type": "text",
+                "required": True,
+            },
+        ]
+        if is_salon:
+            questions.append(
+                {
+                    "key": "stylist_preference",
+                    "question": "Do you have any stylist or treatment preference?",
+                    "answer_type": "text",
+                    "required": False,
+                }
+            )
+        return questions
+
+    def _normalize_business_services(self, services: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for service in services:
+            name = str(service.get("name") or "Service").strip()
+            category = str(service.get("category_name") or "").strip()
+            price = str(service.get("price") or "").strip()
+            duration = service.get("duration")
+            allow_booking = bool(service.get("allow_booking", True))
+            description = str(service.get("description") or "").strip()
+            price_note = []
+            if duration:
+                price_note.append(f"Duration: {duration} minutes")
+            if not allow_booking:
+                price_note.append("Currently inquiry only")
+            keywords = [self._slug(name).replace("_", " ")]
+            if category:
+                keywords.append(category)
+            normalized.append(
+                {
+                    "service_id": str(service.get("id") or self._slug(name)),
+                    "name": name,
+                    "description": description or f"{name} service",
+                    "base_price": price,
+                    "base_price_bhd": price,
+                    "currency": "",
+                    "price_note": ". ".join(price_note),
+                    "keywords": keywords,
+                }
+            )
+        return normalized
+
+    def _normalize_business_faqs(self, faqs: list[dict[str, Any]]) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        for item in faqs:
+            question = str(item.get("question") or "").strip()
+            answer = str(item.get("answer") or "").strip()
+            if question and answer:
+                normalized[question] = answer
+        return normalized
+
+    def _normalize_business_hours(self, hours: list[dict[str, Any]]) -> str:
+        segments: list[str] = []
+        for item in sorted(hours, key=lambda row: int(row.get("day", 99))):
+            day_name = self._day_name(int(item.get("day", 99)))
+            if item.get("is_closed"):
+                segments.append(f"{day_name}: Closed")
+                continue
+            open_time = self._compact_time(str(item.get("open_time") or ""))
+            close_time = self._compact_time(str(item.get("close_time") or ""))
+            if open_time and close_time:
+                segments.append(f"{day_name}: {open_time}-{close_time}")
+        return "; ".join(segments)
+
+    def _policy_content(self, policies: list[dict[str, Any]], policy_type: str) -> str:
+        for item in policies:
+            if str(item.get("policy_type") or "").strip().lower() == policy_type:
+                return str(item.get("content") or "").strip()
+        return ""
+
+    def _normalize_business_record(self, payload: dict[str, Any]) -> dict[str, Any]:
+        business_name = str(payload.get("name") or payload.get("business_name") or "Business").strip()
+        business_type = str(payload.get("business_type") or "").strip()
+        description = str(payload.get("description") or "").strip()
+        address = str(payload.get("address") or "").strip()
+        timezone = str(payload.get("timezone") or "").strip()
+        services = self._normalize_business_services(payload.get("services") or [])
+        faqs = self._normalize_business_faqs(payload.get("faqs") or [])
+        additional_info = [
+            str(item.get("content") or "").strip()
+            for item in payload.get("additional_info") or []
+            if str(item.get("content") or "").strip()
+        ]
+        if address:
+            additional_info.insert(0, f"Business address: {address}")
+        if timezone:
+            additional_info.append(f"Business timezone: {timezone}")
+        if payload.get("business_website"):
+            additional_info.append(f"Website: {payload['business_website']}")
+        if payload.get("business_email"):
+            additional_info.append(f"Contact email: {payload['business_email']}")
+
+        greeting = (
+            f"Hello, thank you for calling {business_name}. "
+            "How can I help you today?"
+        )
+        return {
+            "agent_id": str(payload.get("id") or payload.get("agent_id") or "default"),
+            "business_name": business_name,
+            "greeting": greeting,
+            "intake_questions": self._default_questions_for_business(business_type),
+            "language": "en",
+            "multilingual_enabled": True,
+            "supported_languages": ["en", "ar", "hi", "fr", "es"],
+            "default_greeting_language": "en",
+            "language_voice_map": {},
+            "fallback_phone": None,
+            "max_call_duration_minutes": 15,
+            "coverage_country": "",
+            "coverage_areas": [address] if address else [],
+            "excluded_areas": [],
+            "service_catalog": services,
+            "booking_required_fields": ["service_type", "location", "preferred_time"],
+            "faqs": faqs,
+            "business_description": description or business_type,
+            "business_hours": self._normalize_business_hours(payload.get("hours") or []),
+            "cancellation_policy": self._policy_content(payload.get("policies") or [], "cancellation"),
+            "payment_policy": self._policy_content(payload.get("policies") or [], "payment"),
+            "deposit_policy": self._policy_content(payload.get("policies") or [], "deposit"),
+            "additional_information": additional_info,
+            "notes": [f"Business type: {business_type}"] if business_type else [],
+        }
+
+    def _select_business_payload(self, payload: Any, agent_id: str | None) -> dict[str, Any]:
+        if isinstance(payload, dict):
+            return payload
+        if not isinstance(payload, list):
+            raise BackendCommunicationError("Unsupported business payload shape")
+
+        if not payload:
+            raise BackendCommunicationError("No businesses returned by backend")
+
+        if agent_id is not None:
+            for item in payload:
+                if str(item.get("id")) == str(agent_id):
+                    return item
+
+        for item in payload:
+            if bool(item.get("is_active", True)):
+                return item
+
+        return payload[0]
+
+    async def _fetch_business_catalog_record(self, agent_id: str | None = None) -> dict[str, Any]:
+        payload = await self._get(self._business_catalog_url())
+        return self._select_business_payload(payload, agent_id)
 
     @retry(
         reraise=True,
@@ -257,7 +462,7 @@ class BackendClient:
     async def _post(self, url: str, payload: dict[str, Any]) -> dict[str, Any]:
         self._ensure_circuit()
         try:
-            response = await self.client.post(url, headers=self._headers, json=payload)
+            response = await self.client.post(url, headers=self._headers, json=payload, follow_redirects=True)
             response.raise_for_status()
             self._record_success()
             return response.json()
@@ -343,6 +548,14 @@ class BackendClient:
         if self._local_fallback_enabled():
             return self._fallback_agent_config(agent_id)
 
+        if self._is_business_catalog_endpoint():
+            try:
+                payload = await self._fetch_business_catalog_record(agent_id)
+                return AgentConfig(**self._normalize_business_record(payload))
+            except Exception:  # noqa: BLE001
+                logger.warning("Falling back to local dummy agent config", agent_id=agent_id)
+                return self._fallback_agent_config(agent_id)
+
         url = f"{self.base_url}/agents/{agent_id or 'default'}/voice-config"
         try:
             payload = await self._get(url)
@@ -359,6 +572,16 @@ class BackendClient:
         if self._local_fallback_enabled():
             agent = self._fallback_agent_config(agent_id)
             return self._agent_to_ui_context(agent)
+
+        if self._is_business_catalog_endpoint():
+            try:
+                payload = await self._fetch_business_catalog_record(agent_id)
+                agent = AgentConfig(**self._normalize_business_record(payload))
+                return self._agent_to_ui_context(agent)
+            except Exception:  # noqa: BLE001
+                logger.warning("Falling back to local UI context", agent_id=agent_id)
+                agent = self._fallback_agent_config(agent_id)
+                return self._agent_to_ui_context(agent)
 
         url = f"{self.base_url}/agents/{agent_id or 'default'}/ui-context"
         try:
@@ -381,6 +604,15 @@ class BackendClient:
             mapped = routing.get(to_number)
             return str(mapped) if mapped else None
 
+        if self._is_business_catalog_endpoint():
+            try:
+                payload = await self._fetch_business_catalog_record()
+                value = payload.get("id")
+                return str(value) if value is not None else None
+            except Exception:  # noqa: BLE001
+                logger.warning("Business catalog agent resolution failed; using default mapping")
+                return "default"
+
         url = f"{self.base_url}/telephony/resolve-agent"
         try:
             payload = await self._post(url, {"to_number": to_number})
@@ -395,46 +627,84 @@ class BackendClient:
 
     async def answer_business_query(self, query: str, agent_id: str | None = None) -> dict[str, Any]:
         agent = await self.fetch_agent_config(agent_id)
+        return self.build_business_query_answer(agent, query)
+
+    def build_business_query_answer(self, agent: AgentConfig, query: str) -> dict[str, Any]:
         text = query.lower()
 
-        service_lines = [
-            f"{service.name} ({service.base_price_bhd})"
-            for service in agent.service_catalog[:6]
-        ]
+        service_lines: list[str] = []
+        for service in agent.service_catalog[:6]:
+            price = service.base_price or service.base_price_bhd or "pricing varies"
+            description = service.description.strip() or service.name
+            service_lines.append(f"{service.name}: {description} ({price})")
 
         snippets: list[str] = []
+
         if any(token in text for token in ["service", "services", "provide", "offer", "business", "company"]):
-            snippets.append(
-                f"{agent.business_name} offers: {', '.join(service_lines)}."
-                if service_lines
-                else f"{agent.business_name} can share service options based on your needs."
-            )
+            if service_lines:
+                snippets.append(f"{agent.business_name} offers {', '.join(service_lines)}.")
+            elif agent.business_description:
+                snippets.append(agent.business_description)
 
-        if any(token in text for token in ["price", "pricing", "cost", "rate", "quote"]):
-            snippets.append("Pricing depends on service type, location, urgency, and required materials.")
-
-        if any(token in text for token in ["coverage", "area", "location", "where"]):
-            if agent.coverage_areas:
-                snippets.append(
-                    f"Coverage is currently {agent.coverage_country}, including {', '.join(agent.coverage_areas[:8])}."
-                )
+        if any(token in text for token in ["price", "pricing", "cost", "rate", "quote", "fee"]):
+            if service_lines:
+                snippets.append("Current pricing includes " + "; ".join(service_lines[:3]) + ".")
             else:
-                snippets.append(f"Coverage is currently {agent.coverage_country}.")
+                snippets.append("Pricing depends on the selected service and appointment details.")
 
-        if any(token in text for token in ["payment", "pay", "deposit"]):
+        if any(token in text for token in ["hour", "open", "close", "timing", "time"]):
+            if agent.business_hours:
+                snippets.append(f"Our business hours are {agent.business_hours}.")
+            else:
+                snippets.append("Business hours vary by day, and our team can confirm the latest schedule for you.")
+
+        if any(token in text for token in ["payment", "pay", "deposit", "card", "cash"]):
             if agent.payment_policy:
                 snippets.append(agent.payment_policy)
             if agent.deposit_policy:
                 snippets.append(agent.deposit_policy)
+            if not agent.payment_policy and not agent.deposit_policy:
+                snippets.append("Payment details depend on the selected service, and we can confirm the exact policy for you.")
 
-        for key, value in agent.faqs.items():
-            if key.lower() in text and value:
-                snippets.append(value)
+        if any(token in text for token in ["cancel", "cancellation", "refund", "reschedule"]):
+            if agent.cancellation_policy:
+                snippets.append(agent.cancellation_policy)
+            else:
+                snippets.append("Cancellation terms depend on the appointment type, and we can confirm the latest policy for you.")
+
+        if any(token in text for token in ["where", "address", "location", "located"]):
+            location_added = False
+            if agent.coverage_areas:
+                snippets.append(f"We are located at or serve {', '.join(agent.coverage_areas[:5])}.")
+                location_added = True
+            else:
+                for info in agent.additional_information:
+                    if "address:" in info.lower():
+                        snippets.append(info)
+                        location_added = True
+                        break
+            if not location_added:
+                snippets.append("We can confirm the exact service area and address details for you.")
+
+        query_tokens = {
+            token
+            for token in re.findall(r"[a-zA-Z]{3,}", text)
+            if token not in {"what", "does", "your", "have", "with", "about", "need", "please"}
+        }
+        for question, answer in agent.faqs.items():
+            question_tokens = {token for token in re.findall(r"[a-zA-Z]{3,}", question.lower())}
+            if query_tokens and query_tokens.intersection(question_tokens):
+                snippets.append(answer)
 
         if not snippets:
-            snippets.append(
-                f"{agent.business_name} can help with bookings, service details, pricing guidance, and booking status updates."
-            )
+            if agent.business_description:
+                snippets.append(agent.business_description)
+            elif service_lines:
+                snippets.append(f"{agent.business_name} offers {', '.join(service_lines)}.")
+            else:
+                snippets.append(
+                    f"{agent.business_name} can help with bookings, service details, pricing guidance, and booking status updates."
+                )
 
         return {
             "answer": " ".join(snippets[:4]).strip(),

@@ -115,6 +115,22 @@ class TwilioClient:
             return self.build_transfer_twiml(text or "", transfer_number, voice=voice)
         return self.build_gather_twiml(text or "", action_url, voice=voice)
 
+    def build_diagnostic_twiml(
+        self,
+        text: str,
+        voice: str = "Polly.Joanna",
+    ) -> str:
+        lines = [
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            "<Response>",
+            f'  <Say voice="{voice}">{self._safe_text(text)}</Say>',
+            "  <Pause length=\"1\"/>",
+            f'  <Say voice="{voice}">{self._safe_text(text)}</Say>',
+            "  <Hangup/>",
+            "</Response>",
+        ]
+        return "\n".join(lines)
+
     # Backward-compatible NCCO bridge methods used by /telephony routes.
     def build_talk_ncco(self, text: str, voice_name: str | None = None) -> list[dict[str, Any]]:
         return [{"action": "talk", "text": text, "voiceName": voice_name or "Polly.Joanna"}]

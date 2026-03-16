@@ -39,6 +39,7 @@ class CallSession(BaseModel):
     preferred_language: str | None = None
     created_at: float = Field(default_factory=time.monotonic)
     last_activity: float = Field(default_factory=time.monotonic)
+    context_updated_at: float = Field(default_factory=time.monotonic)
     is_test: bool = False
 
     # Full conversation history (role-tagged messages for LLM)
@@ -124,6 +125,7 @@ class ConversationEngine:
         environment: str = "development",
         session_manager: CallSessionManager | None = None,
         call_store: CallStore | None = None,
+        context_refresh_ttl_seconds: int = 60,
     ):
         self.backend_client = backend_client
         self.llm_client = llm_client
@@ -131,6 +133,7 @@ class ConversationEngine:
         self.call_store = call_store or CallStore()
         self.environment = environment
         self.sessions = session_manager or CallSessionManager()
+        self.context_refresh_ttl_seconds = max(1, context_refresh_ttl_seconds)
 
     async def has_session(self, call_id: str) -> bool:
         return (await self.sessions.get(call_id)) is not None
@@ -183,6 +186,7 @@ class ConversationEngine:
         session = await self._get_or_create_session(call_id, agent_id)
         await self.sessions.prune()
         start = time.perf_counter()
+        await self._refresh_session_context_if_stale(session)
 
         text = (transcribed_text or "").strip()
 
@@ -209,6 +213,19 @@ class ConversationEngine:
                 "transfer_number": None,
             }
 
+        deterministic_response = self._try_business_info_response(session, text)
+        if deterministic_response is not None:
+            session.add_message("assistant", deterministic_response["text_to_speak"])
+            await self.sessions.save(session)
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            logger.bind(call_id=call_id).info(
+                "Turn processed via business-info fast path",
+                latency_ms=latency_ms,
+                action=deterministic_response.get("action"),
+                turn_count=session.turn_count,
+            )
+            return deterministic_response
+
         try:
             response = await self._llm_turn(session, text)
         except Exception:  # noqa: BLE001
@@ -234,6 +251,159 @@ class ConversationEngine:
         )
 
         return response
+
+    async def _refresh_session_context_if_stale(self, session: CallSession) -> None:
+        now = time.monotonic()
+        if now - session.context_updated_at < self.context_refresh_ttl_seconds:
+            return
+
+        refreshed_config = await self.backend_client.fetch_agent_config(session.agent_id or None)
+        session.agent_config = refreshed_config
+        session.agent_id = refreshed_config.agent_id
+        if not session.preferred_language:
+            preferred_language = refreshed_config.default_greeting_language or refreshed_config.language or "en"
+            session.preferred_language = preferred_language.lower()
+        session.system_prompt = prompts.build_system_prompt(refreshed_config)
+        session.context_updated_at = now
+
+        logger.bind(call_id=session.call_id).info(
+            "Session context refreshed",
+            agent_id=session.agent_id,
+            ttl_seconds=self.context_refresh_ttl_seconds,
+        )
+
+    def _try_business_info_response(
+        self,
+        session: CallSession,
+        user_text: str,
+    ) -> dict[str, str | None] | None:
+        text = user_text.lower().strip()
+        if not text:
+            return None
+
+        booking_tokens = {
+            "book",
+            "booking",
+            "appointment",
+            "reserve",
+            "schedule",
+            "track",
+            "status",
+            "transfer",
+            "human",
+            "agent",
+            "bye",
+            "goodbye",
+        }
+        if any(token in text for token in booking_tokens):
+            return None
+
+        business_info_tokens = {
+            "service",
+            "services",
+            "provide",
+            "offer",
+            "price",
+            "pricing",
+            "cost",
+            "rate",
+            "quote",
+            "hour",
+            "open",
+            "close",
+            "timing",
+            "payment",
+            "deposit",
+            "cancel",
+            "cancellation",
+            "refund",
+            "where",
+            "address",
+            "location",
+            "located",
+            "business",
+            "company",
+            "website",
+            "email",
+        }
+        if not any(token in text for token in business_info_tokens):
+            return None
+
+        builder = getattr(self.backend_client, "build_business_query_answer", None)
+        if callable(builder):
+            result = builder(session.agent_config, user_text)
+        else:
+            result = self._build_business_info_response(session, text)
+        answer = (result.get("answer") or "").strip()
+        if not answer:
+            return None
+
+        return {
+            "action": "speak",
+            "text_to_speak": answer,
+            "transfer_number": None,
+        }
+
+    def _build_business_info_response(self, session: CallSession, text: str) -> dict[str, str]:
+        agent = session.agent_config
+        service_lines: list[str] = []
+        for service in agent.service_catalog[:6]:
+            price = service.base_price or service.base_price_bhd or "pricing varies"
+            description = (service.description or service.name).strip()
+            service_lines.append(f"{service.name}: {description} ({price})")
+
+        snippets: list[str] = []
+
+        if any(token in text for token in {"service", "services", "provide", "offer", "business", "company"}):
+            if service_lines:
+                snippets.append(f"{agent.business_name} offers {', '.join(service_lines)}.")
+            elif agent.business_description:
+                snippets.append(agent.business_description)
+
+        if any(token in text for token in {"price", "pricing", "cost", "rate", "quote"}):
+            if service_lines:
+                snippets.append("Pricing depends on the selected service. Current options include " + "; ".join(service_lines[:3]) + ".")
+
+        if any(token in text for token in {"hour", "open", "close", "timing"}):
+            if agent.business_hours:
+                snippets.append(f"Our business hours are {agent.business_hours}.")
+            else:
+                snippets.append("Business hours vary by day, and our team can confirm the latest schedule for you.")
+
+        if any(token in text for token in {"payment", "deposit"}):
+            if agent.payment_policy:
+                snippets.append(agent.payment_policy)
+            if agent.deposit_policy:
+                snippets.append(agent.deposit_policy)
+            if not agent.payment_policy and not agent.deposit_policy:
+                snippets.append("Payment details depend on the selected service, and we can confirm the exact policy for you.")
+
+        if any(token in text for token in {"cancel", "cancellation", "refund"}):
+            if agent.cancellation_policy:
+                snippets.append(agent.cancellation_policy)
+            else:
+                snippets.append("Cancellation terms depend on the appointment type, and we can confirm the latest policy for you.")
+
+        if any(token in text for token in {"where", "address", "location", "located"}):
+            if agent.coverage_areas:
+                snippets.append(f"We serve {', '.join(agent.coverage_areas[:5])}.")
+            else:
+                snippets.append("We can confirm the exact service area and address details for you.")
+
+        for question, answer in agent.faqs.items():
+            question_tokens = {part for part in question.lower().split() if len(part) > 2}
+            if question_tokens and any(token in question_tokens for token in text.split()):
+                snippets.append(answer)
+
+        if not snippets:
+            if agent.business_description:
+                snippets.append(agent.business_description)
+            elif service_lines:
+                snippets.append(f"{agent.business_name} offers {', '.join(service_lines)}.")
+            else:
+                snippets.append(f"{agent.business_name} can help with service details, pricing, and bookings.")
+
+        return {"answer": " ".join(snippets[:4]).strip()}
 
     async def _llm_turn(self, session: CallSession, user_text: str) -> dict[str, str | None]:
         """Core LLM interaction — handles text responses and tool calls."""
