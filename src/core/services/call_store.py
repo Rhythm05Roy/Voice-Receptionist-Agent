@@ -16,6 +16,7 @@ class CallRecord(BaseModel):
     call_id: str
     agent_id: str = ""
     caller_number: str = ""
+    called_number: str = ""
     started_at: float = Field(default_factory=time.time)
     ended_at: float | None = None
     duration_seconds: float = 0.0
@@ -24,6 +25,7 @@ class CallRecord(BaseModel):
     is_test: bool = False
     transcript: list[dict[str, str]] = Field(default_factory=list)
     summary: str = ""
+    report_payload: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def transcript_preview(self) -> str:
@@ -57,15 +59,27 @@ class CallStore:
         call_id: str,
         agent_id: str = "",
         caller_number: str = "",
+        called_number: str = "",
         is_test: bool = False,
     ) -> CallRecord:
-        record = CallRecord(
-            call_id=call_id,
-            agent_id=agent_id,
-            caller_number=caller_number,
-            is_test=is_test,
-        )
-        self._records[call_id] = record
+        record = self._records.get(call_id)
+        if record is None:
+            record = CallRecord(
+                call_id=call_id,
+                agent_id=agent_id,
+                caller_number=caller_number,
+                called_number=called_number,
+                is_test=is_test,
+            )
+            self._records[call_id] = record
+        else:
+            if agent_id:
+                record.agent_id = agent_id
+            if caller_number:
+                record.caller_number = caller_number
+            if called_number:
+                record.called_number = called_number
+            record.is_test = is_test
         return record
 
     def end_call(
@@ -74,6 +88,7 @@ class CallStore:
         outcome: str = "completed",
         transcript: list[dict[str, str]] | None = None,
         turn_count: int = 0,
+        report_payload: dict[str, Any] | None = None,
     ) -> CallRecord | None:
         record = self._records.get(call_id)
         if not record:
@@ -84,6 +99,8 @@ class CallStore:
         record.turn_count = turn_count
         if transcript:
             record.transcript = transcript
+        if report_payload:
+            record.report_payload = report_payload
         return record
 
     def get_call(self, call_id: str) -> CallRecord | None:

@@ -361,6 +361,19 @@ def test_end_call_clears_session():
     assert not asyncio.run(engine.has_session("call-008"))
 
 
+def test_call_report_contains_booking_details():
+    engine, _, _ = _make_engine()
+    asyncio.run(engine.start_session("call-008b", caller_number="+14165550101", called_number="+15145550111"))
+    asyncio.run(engine.process_user_input("call-008b", "I want to book cleaning in Manama"))
+    report = asyncio.run(engine.build_call_report("call-008b"))
+
+    assert report is not None
+    assert report["customer_details"]["phone_number"] == "+14165550101"
+    assert report["order_or_booked_service"]["interaction_type"] == "booking"
+    assert report["order_or_booked_service"]["service_type"] == "Home Deep Cleaning"
+    assert report["call_analytics"]["called_number"] == "+15145550111"
+
+
 def test_session_context_refreshes_after_ttl():
     engine, backend, _ = _make_engine()
     engine.context_refresh_ttl_seconds = 1

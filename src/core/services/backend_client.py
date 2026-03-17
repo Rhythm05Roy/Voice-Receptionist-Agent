@@ -24,6 +24,10 @@ def _retryable(exc: Exception) -> bool:
 
 
 class BackendClient:
+    _runtime_phone_routing: dict[str, str] = {}
+    _runtime_agent_numbers: dict[str, dict[str, str]] = {}
+    _runtime_forwarding_numbers: dict[str, str] = {}
+
     def __init__(self, client: AsyncClient, base_url: str, api_key: str, local_test_mode: bool = False):
         self.client = client
         self.base_url = base_url.rstrip("/")
@@ -79,6 +83,140 @@ class BackendClient:
             return Path(configured).expanduser().resolve()
         project_root = Path(__file__).resolve().parents[3]
         return project_root / "tests" / "dummy_business_db.json"
+
+    def _persist_dummy_db(self) -> None:
+        if not self._dummy_db_cache:
+            return
+        try:
+            db_path = self._dummy_db_path()
+            db_path.write_text(json.dumps(self._dummy_db_cache, indent=2), encoding="utf-8")
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to persist dummy business database")
+
+    def _apply_runtime_overrides(self, agent: AgentConfig) -> AgentConfig:
+        forwarding_number = self._runtime_forwarding_numbers.get(agent.agent_id)
+        if forwarding_number:
+            agent = agent.model_copy(update={"fallback_phone": forwarding_number})
+        assigned_number = self._runtime_agent_numbers.get(agent.agent_id, {}).get("phone_number")
+        if assigned_number:
+            notes = list(agent.notes)
+            binding_note = f"Assigned number: {assigned_number}"
+            if binding_note not in notes:
+                notes.append(binding_note)
+            agent = agent.model_copy(update={"notes": notes})
+        return agent
+
+    def bind_phone_number(
+        self,
+        *,
+        agent_id: str,
+        phone_number: str,
+        phone_number_sid: str = "",
+        friendly_name: str = "",
+    ) -> dict[str, str]:
+        agent_key = str(agent_id)
+        self._runtime_phone_routing[phone_number] = agent_key
+        self._runtime_agent_numbers[agent_key] = {
+            "phone_number": phone_number,
+            "phone_number_sid": phone_number_sid,
+            "friendly_name": friendly_name,
+        }
+
+        db = self._load_dummy_db()
+        if isinstance(db, dict):
+            routing = db.setdefault("phone_routing", {})
+            if isinstance(routing, dict):
+                routing[phone_number] = agent_key
+            self._persist_dummy_db()
+
+        return self._runtime_agent_numbers[agent_key]
+
+    def set_call_forwarding(self, *, agent_id: str, forwarding_number: str) -> dict[str, str]:
+        agent_key = str(agent_id)
+        self._runtime_forwarding_numbers[agent_key] = forwarding_number
+
+        db = self._load_dummy_db()
+        if isinstance(db, dict):
+            agents = db.setdefault("agents", {})
+            if isinstance(agents, dict):
+                raw = agents.get(agent_key)
+                if isinstance(raw, dict):
+                    raw["fallback_phone"] = forwarding_number
+            self._persist_dummy_db()
+
+        return {"agent_id": agent_key, "forwarding_number": forwarding_number}
+
+    def get_phone_assignment(self, agent_id: str) -> dict[str, str] | None:
+        assignment = self._runtime_agent_numbers.get(str(agent_id))
+        if not assignment:
+            return None
+        payload = dict(assignment)
+        forwarding_number = self._runtime_forwarding_numbers.get(str(agent_id))
+        if forwarding_number:
+            payload["forwarding_number"] = forwarding_number
+        return payload
+
+    def rebind_phone_number(
+        self,
+        *,
+        agent_id: str,
+        phone_number: str,
+        phone_number_sid: str = "",
+        friendly_name: str = "",
+    ) -> dict[str, str]:
+        agent_key = str(agent_id)
+        previous_agent_id = self._runtime_phone_routing.get(phone_number)
+        if previous_agent_id and previous_agent_id != agent_key:
+            self._runtime_agent_numbers.pop(previous_agent_id, None)
+        return self.bind_phone_number(
+            agent_id=agent_key,
+            phone_number=phone_number,
+            phone_number_sid=phone_number_sid,
+            friendly_name=friendly_name,
+        )
+
+    def release_phone_number(
+        self,
+        *,
+        agent_id: str | None = None,
+        phone_number: str | None = None,
+        phone_number_sid: str | None = None,
+    ) -> dict[str, str] | None:
+        target_agent_id = str(agent_id) if agent_id else None
+        assignment: dict[str, str] | None = None
+
+        if target_agent_id:
+            assignment = self._runtime_agent_numbers.pop(target_agent_id, None)
+        else:
+            for current_agent_id, current_assignment in list(self._runtime_agent_numbers.items()):
+                if (
+                    (phone_number and current_assignment.get("phone_number") == phone_number)
+                    or (phone_number_sid and current_assignment.get("phone_number_sid") == phone_number_sid)
+                ):
+                    target_agent_id = current_agent_id
+                    assignment = self._runtime_agent_numbers.pop(current_agent_id, None)
+                    break
+
+        if not assignment or not target_agent_id:
+            return None
+
+        assigned_number = assignment.get("phone_number")
+        if assigned_number:
+            self._runtime_phone_routing.pop(assigned_number, None)
+
+        db = self._load_dummy_db()
+        if isinstance(db, dict):
+            routing = db.get("phone_routing", {})
+            if isinstance(routing, dict) and assigned_number:
+                routing.pop(assigned_number, None)
+            self._persist_dummy_db()
+
+        payload = dict(assignment)
+        forwarding_number = self._runtime_forwarding_numbers.get(target_agent_id)
+        if forwarding_number:
+            payload["forwarding_number"] = forwarding_number
+        payload["agent_id"] = target_agent_id
+        return payload
 
     def _default_dummy_db(self) -> dict[str, Any]:
         return {
@@ -477,7 +615,7 @@ class BackendClient:
         key = agent_id or "default"
         raw = agents.get(key) or agents.get("default") or self._default_dummy_db()["agents"]["default"]
         payload = self._normalize_agent_config(raw)
-        return AgentConfig(**payload)
+        return self._apply_runtime_overrides(AgentConfig(**payload))
 
     def _normalize_agent_config(self, payload: dict[str, Any]) -> dict[str, Any]:
         service_catalog = payload.get("service_catalog") or payload.get("services") or []
@@ -551,7 +689,7 @@ class BackendClient:
         if self._is_business_catalog_endpoint():
             try:
                 payload = await self._fetch_business_catalog_record(agent_id)
-                return AgentConfig(**self._normalize_business_record(payload))
+                return self._apply_runtime_overrides(AgentConfig(**self._normalize_business_record(payload)))
             except Exception:  # noqa: BLE001
                 logger.warning("Falling back to local dummy agent config", agent_id=agent_id)
                 return self._fallback_agent_config(agent_id)
@@ -559,7 +697,11 @@ class BackendClient:
         url = f"{self.base_url}/agents/{agent_id or 'default'}/voice-config"
         try:
             payload = await self._get(url)
-            return AgentConfig(**self._normalize_agent_config(payload))
+            normalized = self._normalize_agent_config(payload)
+            intake_questions = await self.fetch_intake_question_configs(str(normalized.get("agent_id") or agent_id or "default"))
+            if intake_questions:
+                normalized["intake_questions"] = intake_questions
+            return self._apply_runtime_overrides(AgentConfig(**normalized))
         except Exception:  # noqa: BLE001
             logger.warning("Falling back to local dummy agent config", agent_id=agent_id)
             return self._fallback_agent_config(agent_id)
@@ -567,6 +709,21 @@ class BackendClient:
     async def fetch_intake_questions(self, agent_id: str | None = None) -> list[str]:
         config = await self.fetch_agent_config(agent_id)
         return [item.question for item in config.intake_questions]
+
+    async def fetch_intake_question_configs(self, agent_id: str | None = None) -> list[dict[str, Any]]:
+        if not agent_id or self._local_fallback_enabled() or self._is_business_catalog_endpoint():
+            config = await self.fetch_agent_config(agent_id)
+            return [item.model_dump() for item in config.intake_questions]
+
+        url = f"{self.base_url}/agents/{agent_id}/intake-questions"
+        try:
+            payload = await self._get(url)
+            questions = payload.get("questions") if isinstance(payload, dict) else payload
+            if isinstance(questions, list):
+                return [dict(item) if isinstance(item, dict) else {"question": str(item)} for item in questions]
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to fetch remote intake questions; falling back to agent config", agent_id=agent_id)
+        return [item.model_dump() for item in self._fallback_agent_config(agent_id).intake_questions]
 
     async def fetch_agent_ui_context(self, agent_id: str | None = None) -> dict[str, Any]:
         if self._local_fallback_enabled():
@@ -576,7 +733,7 @@ class BackendClient:
         if self._is_business_catalog_endpoint():
             try:
                 payload = await self._fetch_business_catalog_record(agent_id)
-                agent = AgentConfig(**self._normalize_business_record(payload))
+                agent = self._apply_runtime_overrides(AgentConfig(**self._normalize_business_record(payload)))
                 return self._agent_to_ui_context(agent)
             except Exception:  # noqa: BLE001
                 logger.warning("Falling back to local UI context", agent_id=agent_id)
@@ -597,6 +754,10 @@ class BackendClient:
     async def resolve_agent_id_for_inbound(self, to_number: str | None) -> str | None:
         if not to_number:
             return None
+
+        runtime_match = self._runtime_phone_routing.get(to_number)
+        if runtime_match:
+            return runtime_match
 
         if self._local_fallback_enabled():
             db = self._load_dummy_db()

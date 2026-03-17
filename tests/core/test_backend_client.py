@@ -92,3 +92,23 @@ def test_fetch_agent_ui_context_from_business_catalog():
     assert payload["payment_policy"].startswith("We accept all major credit cards")
 
     asyncio.run(backend.client.aclose())
+
+
+def test_runtime_phone_binding_resolves_agent_for_inbound():
+    backend = _make_client()
+    backend.bind_phone_number(agent_id="1", phone_number="+15145550101", phone_number_sid="PN123")
+
+    resolved = asyncio.run(backend.resolve_agent_id_for_inbound("+15145550101"))
+
+    assert resolved == "1"
+    asyncio.run(backend.client.aclose())
+
+
+def test_runtime_forwarding_overrides_agent_config():
+    backend = _make_client()
+    backend.set_call_forwarding(agent_id="1", forwarding_number="+97317000088")
+
+    config = asyncio.run(backend.fetch_agent_config("1"))
+
+    assert config.fallback_phone == "+97317000088"
+    asyncio.run(backend.client.aclose())

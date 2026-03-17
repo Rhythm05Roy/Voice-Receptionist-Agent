@@ -7,6 +7,16 @@ import hashlib
 import hmac
 from html import escape
 from typing import Any
+from urllib.parse import quote
+
+try:
+    from twilio.base.exceptions import TwilioRestException
+    from twilio.rest import Client
+except ImportError:  # pragma: no cover - exercised only when dependency missing locally
+    Client = None  # type: ignore[assignment]
+
+    class TwilioRestException(Exception):
+        pass
 
 
 class TwilioClient:
@@ -31,6 +41,179 @@ class TwilioClient:
     @property
     def credentials_available(self) -> bool:
         return bool(self.account_sid and self.auth_token and self.phone_number)
+
+    def _sdk_client(self) -> Client:
+        if Client is None:
+            raise ValueError("twilio package is not installed")
+        if not self.account_sid or not self.auth_token:
+            raise ValueError("Twilio credentials are not configured")
+        return Client(self.account_sid, self.auth_token)
+
+    @staticmethod
+    def _normalize_number_type(number_type: str) -> str:
+        normalized = number_type.strip().lower().replace("-", "_")
+        aliases = {
+            "local": "local",
+            "tollfree": "toll_free",
+            "toll_free": "toll_free",
+            "mobile": "mobile",
+        }
+        if normalized not in aliases:
+            raise ValueError("number_type must be one of: local, toll_free, mobile")
+        return aliases[normalized]
+
+    def search_available_numbers(
+        self,
+        *,
+        country_code: str,
+        number_type: str,
+        limit: int = 1,
+        area_code: int | None = None,
+        contains: str | None = None,
+    ) -> list[dict[str, Any]]:
+        client = self._sdk_client()
+        normalized_type = self._normalize_number_type(number_type)
+        resource = getattr(client.available_phone_numbers(country_code.upper()), normalized_type, None)
+        if resource is None:
+            raise ValueError(f"Unsupported number type for country {country_code}: {number_type}")
+
+        params: dict[str, Any] = {"voice_enabled": True, "limit": limit}
+        if area_code is not None:
+            params["area_code"] = area_code
+        if contains:
+            params["contains"] = contains
+
+        try:
+            matches = resource.list(**params)
+        except TwilioRestException as exc:
+            raise ValueError(exc.msg or "Twilio rejected the number search request") from exc
+
+        return [
+            {
+                "phone_number": match.phone_number,
+                "friendly_name": getattr(match, "friendly_name", "") or match.phone_number,
+                "locality": getattr(match, "locality", None),
+                "region": getattr(match, "region", None),
+                "iso_country": getattr(match, "iso_country", country_code.upper()),
+                "capabilities": getattr(match, "capabilities", {}) or {},
+            }
+            for match in matches
+        ]
+
+    def provision_incoming_number(
+        self,
+        *,
+        agent_id: str,
+        public_base_url: str,
+        country_code: str,
+        number_type: str,
+        area_code: int | None = None,
+        contains: str | None = None,
+        phone_number: str | None = None,
+        friendly_name: str | None = None,
+        address_sid: str | None = None,
+        bundle_sid: str | None = None,
+        identity_sid: str | None = None,
+    ) -> dict[str, Any]:
+        client = self._sdk_client()
+        normalized_type = self._normalize_number_type(number_type)
+
+        chosen_number = phone_number
+        if not chosen_number:
+            matches = self.search_available_numbers(
+                country_code=country_code,
+                number_type=normalized_type,
+                limit=1,
+                area_code=area_code,
+                contains=contains,
+            )
+            if not matches:
+                raise ValueError("No voice-capable phone numbers are currently available for the requested criteria")
+            chosen_number = str(matches[0]["phone_number"])
+
+        base = public_base_url.rstrip("/")
+        encoded_agent_id = quote(agent_id, safe="")
+        voice_url = f"{base}/api/v1/twilio/webhook/incoming?agent_id={encoded_agent_id}"
+        status_callback = f"{base}/api/v1/twilio/webhook/status?agent_id={encoded_agent_id}"
+
+        create_params: dict[str, Any] = {
+            "phone_number": chosen_number,
+            "voice_url": voice_url,
+            "voice_method": "POST",
+            "status_callback": status_callback,
+            "status_callback_method": "POST",
+            "friendly_name": friendly_name or f"agent:{agent_id}:{chosen_number}",
+        }
+        if address_sid:
+            create_params["address_sid"] = address_sid
+        if bundle_sid:
+            create_params["bundle_sid"] = bundle_sid
+        if identity_sid:
+            create_params["identity_sid"] = identity_sid
+
+        try:
+            purchased = client.incoming_phone_numbers.create(**create_params)
+        except TwilioRestException as exc:
+            raise ValueError(exc.msg or "Twilio rejected the number provisioning request") from exc
+
+        return {
+            "agent_id": agent_id,
+            "phone_number_sid": purchased.sid,
+            "phone_number": purchased.phone_number,
+            "friendly_name": getattr(purchased, "friendly_name", create_params["friendly_name"]),
+            "voice_url": getattr(purchased, "voice_url", voice_url),
+            "status_callback": getattr(purchased, "status_callback", status_callback),
+            "capabilities": getattr(purchased, "capabilities", {}) or {},
+            "country_code": country_code.upper(),
+            "number_type": normalized_type,
+            "account_sid": getattr(purchased, "account_sid", self.account_sid),
+        }
+
+    def update_incoming_number_binding(
+        self,
+        *,
+        phone_number_sid: str,
+        agent_id: str,
+        public_base_url: str,
+        friendly_name: str | None = None,
+    ) -> dict[str, Any]:
+        client = self._sdk_client()
+        base = public_base_url.rstrip("/")
+        encoded_agent_id = quote(agent_id, safe="")
+        voice_url = f"{base}/api/v1/twilio/webhook/incoming?agent_id={encoded_agent_id}"
+        status_callback = f"{base}/api/v1/twilio/webhook/status?agent_id={encoded_agent_id}"
+
+        update_params: dict[str, Any] = {
+            "voice_url": voice_url,
+            "voice_method": "POST",
+            "status_callback": status_callback,
+            "status_callback_method": "POST",
+        }
+        if friendly_name:
+            update_params["friendly_name"] = friendly_name
+
+        try:
+            updated = client.incoming_phone_numbers(phone_number_sid).update(**update_params)
+        except TwilioRestException as exc:
+            raise ValueError(exc.msg or "Twilio rejected the number rebind request") from exc
+
+        return {
+            "agent_id": agent_id,
+            "phone_number_sid": updated.sid,
+            "phone_number": updated.phone_number,
+            "friendly_name": getattr(updated, "friendly_name", friendly_name or updated.phone_number),
+            "voice_url": getattr(updated, "voice_url", voice_url),
+            "status_callback": getattr(updated, "status_callback", status_callback),
+            "capabilities": getattr(updated, "capabilities", {}) or {},
+            "account_sid": getattr(updated, "account_sid", self.account_sid),
+        }
+
+    def release_incoming_number(self, *, phone_number_sid: str) -> None:
+        client = self._sdk_client()
+        try:
+            client.incoming_phone_numbers(phone_number_sid).delete()
+        except TwilioRestException as exc:
+            raise ValueError(exc.msg or "Twilio rejected the number release request") from exc
 
     def build_media_stream_twiml(
         self,

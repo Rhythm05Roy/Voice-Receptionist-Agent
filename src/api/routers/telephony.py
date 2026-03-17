@@ -74,7 +74,12 @@ async def inbound_webhook(
             stores.no_input[call_id] = stores.no_input.get(call_id, 0) + 1
 
         if not await engine.has_session(call_id):
-            greeting = await engine.start_session(call_id=call_id, agent_id=agent_id)
+            greeting = await engine.start_session(
+                call_id=call_id,
+                agent_id=agent_id,
+                caller_number=payload.from_number,
+                called_number=payload.to_number,
+            )
             if not speech_text:
                 stores.error_count.pop(call_id, None)
                 ncco = vonage_client.build_talk_ncco(greeting["text"])

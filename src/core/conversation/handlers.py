@@ -29,13 +29,13 @@ async def execute_tool_call(
         return await _handle_submit_booking(arguments, backend_client, agent_config, session_state)
 
     if tool_name == "track_booking":
-        return await _handle_track_booking(arguments, backend_client, agent_config)
+        return await _handle_track_booking(arguments, backend_client, agent_config, session_state)
 
     if tool_name == "transfer_to_human":
-        return _handle_transfer(arguments, agent_config)
+        return _handle_transfer(arguments, agent_config, session_state)
 
     if tool_name == "end_call":
-        return _handle_end_call(arguments)
+        return _handle_end_call(arguments, session_state)
 
     logger.warning("Unknown tool call", tool_name=tool_name)
     return {"status": "error", "message": f"Unknown tool: {tool_name}"}
@@ -125,6 +125,34 @@ async def _handle_submit_booking(
         session_state["last_booking_ref"] = booking_ref
         session_state["last_short_id"] = short_id
         session_state["booking_completed"] = True
+        session_state["interaction_type"] = "booking"
+        session_state["customer_details"] = {
+            **session_state.get("customer_details", {}),
+            "name": customer_name,
+            "phone_number": customer_phone,
+            "location": location,
+        }
+        session_state["order_or_booking"] = {
+            "type": "booking",
+            "service_type": matched_service,
+            "location": location,
+            "preferred_date": preferred_date,
+            "preferred_time": preferred_time,
+            "booking_ref": booking_ref,
+            "short_booking_id": short_id,
+            "status": result.get("status", "confirmed"),
+            "service_specific_details": {
+                key: value
+                for key, value in answers.items()
+                if key not in {"service_type", "location", "preferred_date", "preferred_time", "customer_name", "customer_phone"}
+                and value not in (None, "")
+            },
+        }
+        session_state["intake_answers"] = {
+            key: value
+            for key, value in answers.items()
+            if value not in (None, "")
+        }
 
         return {
             "status": "confirmed",
@@ -149,6 +177,7 @@ async def _handle_track_booking(
     args: dict[str, Any],
     backend_client: Any,
     agent_config: Any,
+    session_state: dict[str, Any],
 ) -> dict[str, Any]:
     """Look up booking status from the backend."""
     booking_id = args.get("booking_id", "").strip()
@@ -158,6 +187,15 @@ async def _handle_track_booking(
 
     try:
         result = await backend_client.track_booking(booking_id, agent_id=agent_config.agent_id)
+        session_state["interaction_type"] = "tracking"
+        session_state["order_or_booking"] = {
+            "type": "tracking",
+            "booking_ref": result.get("booking_ref", booking_id),
+            "status": result.get("status", "unknown"),
+            "service_name": result.get("service_name"),
+            "location": result.get("location"),
+            "preferred_time": result.get("preferred_time"),
+        }
         return {
             "status": result.get("status", "unknown"),
             "booking_ref": result.get("booking_ref", booking_id),
@@ -171,7 +209,7 @@ async def _handle_track_booking(
         return {"status": "error", "message": f"Could not look up booking: {exc}"}
 
 
-def _handle_transfer(args: dict[str, Any], agent_config: Any) -> dict[str, Any]:
+def _handle_transfer(args: dict[str, Any], agent_config: Any, session_state: dict[str, Any]) -> dict[str, Any]:
     """Return transfer instruction."""
     reason = args.get("reason", "caller requested")
     phone = agent_config.fallback_phone
@@ -182,6 +220,9 @@ def _handle_transfer(args: dict[str, Any], agent_config: Any) -> dict[str, Any]:
             "message": "No human agent is available right now. Please try again later.",
         }
 
+    session_state["transferred"] = True
+    session_state["interaction_type"] = session_state.get("interaction_type") or "transfer"
+    session_state["transfer_reason"] = reason
     return {
         "status": "transferring",
         "transfer_number": phone,
@@ -190,9 +231,10 @@ def _handle_transfer(args: dict[str, Any], agent_config: Any) -> dict[str, Any]:
     }
 
 
-def _handle_end_call(args: dict[str, Any]) -> dict[str, Any]:
+def _handle_end_call(args: dict[str, Any], session_state: dict[str, Any]) -> dict[str, Any]:
     """Return call-ending instruction."""
     farewell = args.get("farewell_message", "Thank you for calling. Goodbye!")
+    session_state["ended_by_agent"] = True
     return {
         "status": "ended",
         "farewell_message": farewell,

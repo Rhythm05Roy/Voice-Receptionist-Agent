@@ -6,15 +6,25 @@ class _FakeEngine:
     def __init__(self):
         self._sessions = set()
         self.ended = []
+        self.started_agent_ids = []
+        self.processed_agent_ids = []
 
     async def has_session(self, call_id: str) -> bool:
         return call_id in self._sessions
 
-    async def start_session(self, call_id: str, agent_id: str | None = None):
+    async def start_session(
+        self,
+        call_id: str,
+        agent_id: str | None = None,
+        caller_number: str | None = None,
+        called_number: str | None = None,
+    ):
         self._sessions.add(call_id)
+        self.started_agent_ids.append(agent_id)
         return {"text": "hello", "audio_url": "data:audio/mpeg;base64,AAA"}
 
     async def process_user_input(self, call_id: str, transcribed_text: str, agent_id: str | None = None):
+        self.processed_agent_ids.append(agent_id)
         if transcribed_text.lower() in {"bye", "hangup"}:
             return {"action": "hangup", "text_to_speak": "bye", "transfer_number": None}
         return {"action": "speak", "text_to_speak": f"echo {transcribed_text}", "transfer_number": None}
@@ -183,6 +193,26 @@ def test_twilio_incoming_processes_speech(client):
     assert response.status_code == 200
     assert "echo need cleaning" in response.text
     assert "<Gather" in response.text
+
+    client.app.dependency_overrides.clear()
+
+
+def test_twilio_incoming_uses_agent_id_query_binding(client):
+    engine = _FakeEngine()
+    _twilio_overrides(client, engine)
+
+    response = client.post(
+        "/api/v1/twilio/webhook/incoming?agent_id=agent-77",
+        data={
+            "CallSid": "CA223",
+            "From": "+10000000001",
+            "To": "+10000000002",
+        },
+    )
+
+    assert response.status_code == 200
+    assert engine.started_agent_ids == ["agent-77"]
+    assert 'action="http://testserver/api/v1/twilio/webhook/incoming?agent_id=agent-77"' in response.text
 
     client.app.dependency_overrides.clear()
 

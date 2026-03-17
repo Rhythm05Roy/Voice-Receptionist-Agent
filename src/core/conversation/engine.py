@@ -143,6 +143,8 @@ class ConversationEngine:
         call_id: str,
         agent_id: str | None = None,
         is_test: bool = False,
+        caller_number: str | None = None,
+        called_number: str | None = None,
     ) -> dict[str, str]:
         """Create a new call session and return the greeting."""
         agent_config = await self.backend_client.fetch_agent_config(agent_id)
@@ -159,11 +161,24 @@ class ConversationEngine:
             preferred_language=preferred_language.lower(),
             system_prompt=system_prompt,
         )
+        session.state["customer_details"] = {
+            "phone_number": caller_number or "",
+        }
+        session.state["call_context"] = {
+            "called_number": called_number or "",
+        }
 
         # Greeting
         greeting = agent_config.greeting or prompts.GREETING_TEMPLATE
         session.add_message("assistant", greeting)
         await self.sessions.save(session)
+        self.call_store.start_call(
+            call_id=call_id,
+            agent_id=agent_config.agent_id,
+            caller_number=caller_number or "",
+            called_number=called_number or "",
+            is_test=is_test,
+        )
 
         # TTS for greeting
         audio_url = ""
@@ -215,6 +230,9 @@ class ConversationEngine:
 
         deterministic_response = self._try_business_info_response(session, text)
         if deterministic_response is not None:
+            session.state["interaction_type"] = session.state.get("interaction_type") or "query"
+            queries = session.state.setdefault("queries", [])
+            queries.append({"text": text, "type": "business_info"})
             session.add_message("assistant", deterministic_response["text_to_speak"])
             await self.sessions.save(session)
             latency_ms = int((time.perf_counter() - start) * 1000)
@@ -420,6 +438,7 @@ class ConversationEngine:
 
         # If no tool calls, just return the text response
         if not tool_calls:
+            session.state["interaction_type"] = session.state.get("interaction_type") or "query"
             return {
                 "action": "speak",
                 "text_to_speak": response_text or "Is there anything else I can help you with?",
@@ -519,13 +538,7 @@ class ConversationEngine:
             if last_state.get("transferred"):
                 outcome = "transferred"
 
-            # Log to call store for analytics
-            self.call_store.start_call(
-                call_id=call_id,
-                agent_id=session.agent_id,
-                is_test=session.is_test,
-            )
-            self.call_store.end_call(
+            record = self.call_store.end_call(
                 call_id=call_id,
                 outcome=outcome,
                 transcript=[
@@ -535,6 +548,8 @@ class ConversationEngine:
                 ],
                 turn_count=session.turn_count,
             )
+            if record is not None:
+                record.report_payload = self._build_call_report_payload(session)
 
         await self.sessions.delete(call_id)
         logger.bind(call_id=call_id).info("Session ended")
@@ -549,3 +564,107 @@ class ConversationEngine:
         if created is None:
             raise ConversationEngineError(f"Unable to create session for {call_id}")
         return created
+
+    async def build_call_report(self, call_id: str) -> dict[str, Any] | None:
+        session = await self.sessions.get(call_id)
+        if session is not None:
+            return self._build_call_report_payload(session)
+
+        record = self.call_store.get_call(call_id)
+        if record is None:
+            return None
+        if record.report_payload:
+            return record.report_payload
+
+        return {
+            "call_id": record.call_id,
+            "agent_id": record.agent_id,
+            "customer_details": {
+                "phone_number": record.caller_number,
+            },
+            "order_or_booked_service": {},
+            "call_analytics": {
+                "call_id": record.call_id,
+                "agent_id": record.agent_id,
+                "duration_seconds": round(record.duration_seconds, 2),
+                "turn_count": record.turn_count,
+                "outcome": record.outcome,
+                "started_at": record.started_at,
+                "ended_at": record.ended_at,
+                "is_test": record.is_test,
+                "called_number": record.called_number,
+            },
+            "transcript": list(record.transcript),
+        }
+
+    def _build_call_report_payload(self, session: CallSession) -> dict[str, Any]:
+        record = self.call_store.get_call(session.call_id)
+        customer_details = dict(session.state.get("customer_details") or {})
+        if record and record.caller_number and not customer_details.get("phone_number"):
+            customer_details["phone_number"] = record.caller_number
+        if session.preferred_language:
+            customer_details.setdefault("language", session.preferred_language)
+
+        order_or_booking = dict(session.state.get("order_or_booking") or {})
+        interaction_type = session.state.get("interaction_type") or order_or_booking.get("type") or "unknown"
+        if session.state.get("queries"):
+            order_or_booking.setdefault("queries", list(session.state.get("queries", [])))
+        if session.state.get("intake_answers"):
+            order_or_booking.setdefault("intake_answers", dict(session.state.get("intake_answers", {})))
+        if session.state.get("last_booking_ref"):
+            order_or_booking.setdefault("booking_ref", session.state.get("last_booking_ref"))
+        if session.state.get("last_short_id"):
+            order_or_booking.setdefault("short_booking_id", session.state.get("last_short_id"))
+        order_or_booking.setdefault("interaction_type", interaction_type)
+
+        intake_answers = dict(session.state.get("intake_answers") or {})
+        configured_questions = []
+        for question in session.agent_config.intake_questions:
+            configured_questions.append(
+                {
+                    "key": question.key,
+                    "question": question.question,
+                    "answer_type": question.answer_type,
+                    "required": question.required,
+                    "ask_when": question.ask_when,
+                    "specific_categories": list(question.specific_categories),
+                    "service_tags": list(question.service_tags),
+                    "is_active": question.is_active,
+                    "answer": intake_answers.get(question.key),
+                }
+            )
+
+        started_at = record.started_at if record else None
+        ended_at = record.ended_at if record else None
+        duration_seconds = round(record.duration_seconds, 2) if record else round(session.call_duration_seconds, 2)
+        caller_number = record.caller_number if record else customer_details.get("phone_number", "")
+        called_number = record.called_number if record else (session.state.get("call_context") or {}).get("called_number", "")
+
+        return {
+            "call_id": session.call_id,
+            "agent_id": session.agent_id,
+            "business_name": session.agent_config.business_name,
+            "customer_details": customer_details,
+            "order_or_booked_service": order_or_booking,
+            "configured_intake_questions": configured_questions,
+            "call_analytics": {
+                "call_id": session.call_id,
+                "agent_id": session.agent_id,
+                "business_name": session.agent_config.business_name,
+                "caller_number": caller_number,
+                "called_number": called_number,
+                "started_at": started_at,
+                "ended_at": ended_at,
+                "duration_seconds": duration_seconds,
+                "turn_count": session.turn_count,
+                "outcome": "transferred" if session.state.get("transferred") else "completed",
+                "was_transferred": bool(session.state.get("transferred")),
+                "transfer_number": session.agent_config.fallback_phone,
+                "is_test": session.is_test,
+            },
+            "transcript": [
+                {"role": item.get("role", ""), "content": item.get("content", "")}
+                for item in session.conversation_history
+                if item.get("content")
+            ],
+        }

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import Response
 from loguru import logger
 
@@ -33,9 +33,10 @@ def _signed_url(request: Request, settings: Settings) -> str:
 
 
 def _action_url(request: Request, settings: Settings) -> str:
+    query = f"?{request.url.query}" if request.url.query else ""
     if settings.public_base_url:
-        return f"{settings.public_base_url.rstrip('/')}{request.url.path}"
-    return str(request.url_for("twilio_incoming_call"))
+        return f"{settings.public_base_url.rstrip('/')}{request.url.path}{query}"
+    return f"{request.url_for('twilio_incoming_call')}{query}"
 
 
 @router.post("/webhook/incoming", name="twilio_incoming_call")
@@ -46,6 +47,7 @@ async def incoming_call(
     engine: ConversationEngine = Depends(get_conversation_engine),
     twilio_client: TwilioClient = Depends(get_twilio_client),
     backend_client: BackendClient = Depends(get_backend_client),
+    agent_id: str | None = Query(default=None),
     CallSid: str = Form(""),
     From: str = Form(""),
     To: str = Form(""),
@@ -77,8 +79,13 @@ async def incoming_call(
         )
 
         if not await engine.has_session(call_id):
-            agent_id = await backend_client.resolve_agent_id_for_inbound(To)
-            greeting = await engine.start_session(call_id=call_id, agent_id=agent_id)
+            resolved_agent_id = agent_id or await backend_client.resolve_agent_id_for_inbound(To)
+            greeting = await engine.start_session(
+                call_id=call_id,
+                agent_id=resolved_agent_id,
+                caller_number=From,
+                called_number=To,
+            )
 
             if not speech_text:
                 twiml = twilio_client.build_gather_twiml(text=greeting["text"], action_url=action_url)
@@ -91,7 +98,7 @@ async def incoming_call(
             )
             return Response(content=twiml, media_type=TWIML_CONTENT_TYPE)
 
-        action = await engine.process_user_input(call_id=call_id, transcribed_text=speech_text)
+        action = await engine.process_user_input(call_id=call_id, transcribed_text=speech_text, agent_id=agent_id)
         twiml = twilio_client.build_action_twiml(action=action, action_url=action_url)
 
         if action.get("action") == "hangup":

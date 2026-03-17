@@ -17,6 +17,16 @@ class DisqualificationRule(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_rule(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            raw = dict(value)
+            if raw.get("disqualifying_value") and not raw.get("if_answer"):
+                raw["if_answer"] = raw["disqualifying_value"]
+            return raw
+        return value
+
 
 class IntakeQuestion(BaseModel):
     key: str
@@ -25,10 +35,12 @@ class IntakeQuestion(BaseModel):
     required: bool = True
     ask_when: QuestionAskWhen = "all_bookings"
     service_tags: list[str] = Field(default_factory=list)
+    specific_categories: list[str] = Field(default_factory=list)
     options: list[str] = Field(default_factory=list)
     disqualification_rules: list[DisqualificationRule] = Field(default_factory=list)
     retry_prompt: str | None = None
     validation_regex: str | None = None
+    is_active: bool = True
 
     model_config = ConfigDict(extra="ignore")
 
@@ -57,15 +69,22 @@ class IntakeQuestion(BaseModel):
                 text = str(ask_when).strip().lower().replace(" ", "_")
                 if "specific" in text:
                     text = "specific_services"
+                elif "tagged" in text:
+                    text = "specific_services"
                 elif "all" in text:
                     text = "all_bookings"
                 raw["ask_when"] = text
-            tags = raw.get("service_tags") or raw.get("serviceTags")
+            tags = raw.get("service_tags") or raw.get("serviceTags") or raw.get("specific_services")
             if tags is not None:
                 raw["service_tags"] = list(tags)
+            categories = raw.get("specific_categories")
+            if categories is not None:
+                raw["specific_categories"] = [str(item) for item in categories]
             rules = raw.get("disqualification_rules") or raw.get("disqualification")
             if rules is not None:
                 raw["disqualification_rules"] = list(rules)
+            if "is_required" in raw and "required" not in raw:
+                raw["required"] = raw["is_required"]
             return raw
         return value
 

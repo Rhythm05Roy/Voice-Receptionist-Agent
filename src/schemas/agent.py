@@ -1,6 +1,6 @@
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class AgentPreviewRequest(BaseModel):
@@ -64,3 +64,111 @@ class AgentTrackBookingResponse(BaseModel):
     service_name: str | None = None
     location: str | None = None
     preferred_time: str | None = None
+
+
+class AgentPhoneNumberProvisionRequest(BaseModel):
+    agent_id: str = Field(..., min_length=1, description="Agent or business identifier to bind to the number")
+    country_code: str = Field(default="CA", min_length=2, max_length=2, description="ISO 3166-1 alpha-2 country code")
+    number_type: Literal["local", "toll_free", "mobile"] = Field(default="local")
+    area_code: int | None = Field(default=None, ge=100, le=999)
+    contains: str | None = Field(default=None, min_length=2, max_length=16)
+    phone_number: str | None = Field(default=None, description="Exact E.164 number to purchase if already selected")
+    friendly_name: str | None = Field(default=None, min_length=3, max_length=64)
+    address_sid: str | None = Field(default=None, description="Twilio AddressSid for regulated geographies")
+    bundle_sid: str | None = Field(default=None, description="Twilio BundleSid for regulated geographies")
+    identity_sid: str | None = Field(default=None, description="Twilio IdentitySid if required by regulation")
+
+
+class AgentPhoneNumberProvisionResponse(BaseModel):
+    agent_id: str
+    phone_number_sid: str
+    phone_number: str
+    friendly_name: str
+    voice_url: str
+    status_callback: str
+    capabilities: dict[str, Any] = Field(default_factory=dict)
+    country_code: str
+    number_type: str
+    account_sid: str
+
+
+class AgentPhoneNumberSearchItem(BaseModel):
+    phone_number: str
+    friendly_name: str
+    locality: str | None = None
+    region: str | None = None
+    iso_country: str
+    capabilities: dict[str, Any] = Field(default_factory=dict)
+
+
+class AgentCallForwardingRequest(BaseModel):
+    agent_id: str = Field(..., min_length=1, description="Agent or business identifier")
+    forwarding_number: str = Field(..., min_length=7, description="Phone number used for live human transfer")
+
+
+class AgentCallForwardingResponse(BaseModel):
+    agent_id: str
+    forwarding_number: str
+    assigned_phone_number: str | None = None
+
+
+class AgentPhoneNumberAssignmentResponse(BaseModel):
+    agent_id: str
+    phone_number: str | None = None
+    phone_number_sid: str | None = None
+    friendly_name: str | None = None
+    forwarding_number: str | None = None
+
+
+class AgentPhoneNumberRebindRequest(BaseModel):
+    agent_id: str = Field(..., min_length=1)
+    phone_number_sid: str = Field(..., min_length=3)
+    phone_number: str = Field(..., min_length=7)
+    friendly_name: str | None = Field(default=None, min_length=3, max_length=64)
+
+
+class AgentPhoneNumberRebindResponse(BaseModel):
+    agent_id: str
+    phone_number_sid: str
+    phone_number: str
+    friendly_name: str
+    voice_url: str
+    status_callback: str
+    capabilities: dict[str, Any] = Field(default_factory=dict)
+    account_sid: str
+
+
+class AgentPhoneNumberReleaseRequest(BaseModel):
+    agent_id: str | None = None
+    phone_number: str | None = None
+    phone_number_sid: str | None = None
+    release_provider_number: bool = True
+
+    @model_validator(mode="after")
+    def validate_identifier(self) -> "AgentPhoneNumberReleaseRequest":
+        if not self.agent_id and not self.phone_number and not self.phone_number_sid:
+            raise ValueError("Provide agent_id, phone_number, or phone_number_sid to release a number")
+        return self
+
+
+class AgentPhoneNumberReleaseResponse(BaseModel):
+    status: str
+    agent_id: str | None = None
+    phone_number: str | None = None
+    phone_number_sid: str | None = None
+    forwarding_number: str | None = None
+
+
+class AgentCallReportRequest(BaseModel):
+    call_id: str = Field(..., min_length=1)
+
+
+class AgentCallReportResponse(BaseModel):
+    call_id: str
+    agent_id: str
+    business_name: str | None = None
+    customer_details: dict[str, Any] = Field(default_factory=dict)
+    order_or_booked_service: dict[str, Any] = Field(default_factory=dict)
+    configured_intake_questions: list[dict[str, Any]] = Field(default_factory=list)
+    call_analytics: dict[str, Any] = Field(default_factory=dict)
+    transcript: list[dict[str, str]] = Field(default_factory=list)
