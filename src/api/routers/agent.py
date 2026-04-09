@@ -21,6 +21,7 @@ from src.schemas import (
     AgentPhoneNumberProvisionRequest,
     AgentPhoneNumberProvisionResponse,
     AgentPhoneNumberSearchItem,
+    AgentPhoneNumberSearchRequest,
     AgentPhoneNumberRebindRequest,
     AgentPhoneNumberRebindResponse,
     AgentPhoneNumberReleaseRequest,
@@ -33,6 +34,48 @@ from src.schemas import (
 )
 
 router = APIRouter(prefix="/agent", tags=["agent"])
+
+
+async def _run_phone_number_search(
+    *,
+    country_code: str,
+    number_type: str,
+    area_code: int | None,
+    contains: str | None,
+    limit: int,
+    twilio_client: TwilioClient,
+) -> list[AgentPhoneNumberSearchItem]:
+    if not twilio_client.credentials_available:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Twilio credentials are not configured for number search.",
+        )
+    if number_type != "local" and area_code is not None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="area_code is only supported for local number searches.",
+        )
+
+    try:
+        matches = await run_in_threadpool(
+            twilio_client.search_available_numbers,
+            country_code=country_code,
+            number_type=number_type,
+            limit=limit,
+            area_code=area_code,
+            contains=contains,
+        )
+    except ValueError as exc:
+        logger.warning("Phone number search rejected", reason=str(exc), country_code=country_code, number_type=number_type)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Phone number search failed", country_code=country_code, number_type=number_type)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to search available phone numbers from Twilio.",
+        ) from exc
+
+    return [AgentPhoneNumberSearchItem(**item) for item in matches]
 
 
 # ── Existing Endpoints ───────────────────────────────────────────
@@ -75,8 +118,23 @@ async def track_booking(
     return AgentTrackBookingResponse(**result)
 
 
-@router.get("/phone-numbers/search", response_model=list[AgentPhoneNumberSearchItem])
+@router.post("/phone-numbers/search", response_model=list[AgentPhoneNumberSearchItem])
 async def search_phone_numbers(
+    payload: AgentPhoneNumberSearchRequest,
+    twilio_client: TwilioClient = Depends(get_twilio_client),
+) -> list[AgentPhoneNumberSearchItem]:
+    return await _run_phone_number_search(
+        country_code=payload.country_code,
+        number_type=payload.number_type,
+        area_code=payload.area_code,
+        contains=payload.contains,
+        limit=payload.limit,
+        twilio_client=twilio_client,
+    )
+
+
+@router.get("/phone-numbers/search", response_model=list[AgentPhoneNumberSearchItem])
+async def search_phone_numbers_legacy(
     country_code: str = Query(default="CA", min_length=2, max_length=2),
     number_type: str = Query(default="local"),
     area_code: int | None = Query(default=None, ge=100, le=999),
@@ -84,37 +142,14 @@ async def search_phone_numbers(
     limit: int = Query(default=10, ge=1, le=20),
     twilio_client: TwilioClient = Depends(get_twilio_client),
 ) -> list[AgentPhoneNumberSearchItem]:
-    if not twilio_client.credentials_available:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Twilio credentials are not configured for number search.",
-        )
-    if number_type != "local" and area_code is not None:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="area_code is only supported for local number searches.",
-        )
-
-    try:
-        matches = await run_in_threadpool(
-            twilio_client.search_available_numbers,
-            country_code=country_code,
-            number_type=number_type,
-            limit=limit,
-            area_code=area_code,
-            contains=contains,
-        )
-    except ValueError as exc:
-        logger.warning("Phone number search rejected", reason=str(exc), country_code=country_code, number_type=number_type)
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("Phone number search failed", country_code=country_code, number_type=number_type)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Failed to search available phone numbers from Twilio.",
-        ) from exc
-
-    return [AgentPhoneNumberSearchItem(**item) for item in matches]
+    return await _run_phone_number_search(
+        country_code=country_code,
+        number_type=number_type,
+        area_code=area_code,
+        contains=contains,
+        limit=limit,
+        twilio_client=twilio_client,
+    )
 
 
 @router.post("/call-report", response_model=AgentCallReportResponse)

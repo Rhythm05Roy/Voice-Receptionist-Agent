@@ -12,7 +12,7 @@ from loguru import logger
 from tenacity import before_sleep_log, retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from src.api.exceptions import BackendCommunicationError
-from src.core.types import AgentConfig
+from src.core.types import AgentConfig, ServiceInfo
 
 
 def _retryable(exc: Exception) -> bool:
@@ -494,6 +494,74 @@ class BackendClient:
                 normalized[question] = answer
         return normalized
 
+    @staticmethod
+    def _query_terms(text: str) -> set[str]:
+        stopwords = {
+            "what", "which", "when", "where", "who", "does", "do", "did", "your", "you",
+            "have", "with", "about", "need", "please", "tell", "know", "kind", "actually",
+            "can", "could", "would", "the", "and", "for", "are", "is", "any", "more",
+            "detail", "details", "general", "policy", "policies", "service", "services",
+        }
+        return {
+            token
+            for token in re.findall(r"[a-zA-Z]{3,}", text.lower())
+            if token not in stopwords
+        }
+
+    @staticmethod
+    def _sentences(value: str) -> list[str]:
+        return [part.strip() for part in re.split(r"(?<=[.!?])\s+|\r?\n+", value or "") if part.strip()]
+
+    def _payment_context_snippets(self, agent: AgentConfig, text: str) -> list[str]:
+        snippets: list[str] = []
+        payment_keywords = {"payment", "payments", "pay", "card", "cash", "digital", "gateway", "refund", "split", "bill"}
+
+        if agent.payment_policy:
+            snippets.append(agent.payment_policy)
+        for source in [agent.deposit_policy, agent.cancellation_policy]:
+            for sentence in self._sentences(source):
+                lowered = sentence.lower()
+                if any(keyword in lowered for keyword in payment_keywords):
+                    snippets.append(sentence)
+
+        for question, answer in agent.faqs.items():
+            q_text = f"{question} {answer}".lower()
+            if any(keyword in q_text for keyword in payment_keywords):
+                snippets.append(answer)
+
+        unique: list[str] = []
+        seen: set[str] = set()
+        for item in snippets:
+            if item and item not in seen:
+                unique.append(item)
+                seen.add(item)
+        return unique[:3]
+
+    def _relevant_faq_answers(self, agent: AgentConfig, query: str) -> list[str]:
+        query_terms = self._query_terms(query)
+        if not query_terms:
+            return []
+
+        matches: list[tuple[int, str]] = []
+        for question, answer in agent.faqs.items():
+            faq_terms = self._query_terms(question)
+            overlap = query_terms.intersection(faq_terms)
+            if len(overlap) >= 2:
+                matches.append((len(overlap), answer))
+                continue
+            combined = f"{question} {answer}".lower()
+            if any(term in combined for term in query_terms if len(term) >= 5):
+                matches.append((1, answer))
+
+        matches.sort(key=lambda item: item[0], reverse=True)
+        unique_answers: list[str] = []
+        seen: set[str] = set()
+        for _, answer in matches:
+            if answer not in seen:
+                unique_answers.append(answer)
+                seen.add(answer)
+        return unique_answers[:2]
+
     def _normalize_business_hours(self, hours: list[dict[str, Any]]) -> str:
         segments: list[str] = []
         for item in sorted(hours, key=lambda row: int(row.get("day", 99))):
@@ -790,26 +858,67 @@ class BackendClient:
         agent = await self.fetch_agent_config(agent_id)
         return self.build_business_query_answer(agent, query)
 
+    def _find_matching_services(self, query: str, agent: AgentConfig) -> list[ServiceInfo]:
+        text = query.lower()
+        matches: list[ServiceInfo] = []
+        seen_ids: set[str] = set()
+
+        for service in agent.service_catalog:
+            candidates = [service.name, service.service_id, *service.keywords]
+            if any(candidate and candidate.lower() in text for candidate in candidates):
+                if service.service_id not in seen_ids:
+                    matches.append(service)
+                    seen_ids.add(service.service_id)
+                    continue
+
+            query_tokens = set(re.findall(r"[a-zA-Z]{3,}", text))
+            service_tokens = {
+                token
+                for token in re.findall(r"[a-zA-Z]{3,}", " ".join([service.name, service.service_id, *service.keywords]).lower())
+            }
+            if query_tokens and service_tokens and query_tokens.intersection(service_tokens):
+                if service.service_id not in seen_ids:
+                    matches.append(service)
+                    seen_ids.add(service.service_id)
+
+        return matches
+
     def build_business_query_answer(self, agent: AgentConfig, query: str) -> dict[str, Any]:
         text = query.lower()
+        matched_services = self._find_matching_services(query, agent)
 
         service_lines: list[str] = []
-        for service in agent.service_catalog[:6]:
+        services_to_describe = matched_services or agent.service_catalog[:6]
+        for service in services_to_describe[:6]:
             price = service.base_price or service.base_price_bhd or "pricing varies"
             description = service.description.strip() or service.name
-            service_lines.append(f"{service.name}: {description} ({price})")
+            line = f"{service.name}: {description} ({price})"
+            if service.price_note:
+                line += f". {service.price_note}"
+            service_lines.append(line)
 
         snippets: list[str] = []
+        service_query_tokens = ["service", "services", "provide", "offer", "detail", "details", "about", "explain"]
 
-        if any(token in text for token in ["service", "services", "provide", "offer", "business", "company"]):
-            if service_lines:
-                snippets.append(f"{agent.business_name} offers {', '.join(service_lines)}.")
+        if any(token in text for token in [*service_query_tokens, "business", "company"]):
+            if matched_services and service_lines:
+                snippets.append(f"For {matched_services[0].name}, {service_lines[0]}")
+            elif service_lines:
+                featured = [service.name for service in agent.service_catalog[:4]]
+                remainder = max(0, len(agent.service_catalog) - len(featured))
+                summary = f"{agent.business_name} mainly offers {', '.join(featured)}"
+                if remainder:
+                    summary += f", and {remainder} more options"
+                snippets.append(summary + ".")
             elif agent.business_description:
                 snippets.append(agent.business_description)
 
         if any(token in text for token in ["price", "pricing", "cost", "rate", "quote", "fee"]):
             if service_lines:
-                snippets.append("Current pricing includes " + "; ".join(service_lines[:3]) + ".")
+                if matched_services:
+                    snippets.append(f"Pricing for {matched_services[0].name} starts from {matched_services[0].base_price or matched_services[0].base_price_bhd or 'pricing varies'}.")
+                else:
+                    snippets.append("Current pricing includes " + "; ".join(service_lines[:3]) + ".")
             else:
                 snippets.append("Pricing depends on the selected service and appointment details.")
 
@@ -820,11 +929,10 @@ class BackendClient:
                 snippets.append("Business hours vary by day, and our team can confirm the latest schedule for you.")
 
         if any(token in text for token in ["payment", "pay", "deposit", "card", "cash"]):
-            if agent.payment_policy:
-                snippets.append(agent.payment_policy)
-            if agent.deposit_policy:
-                snippets.append(agent.deposit_policy)
-            if not agent.payment_policy and not agent.deposit_policy:
+            payment_snippets = self._payment_context_snippets(agent, text)
+            if payment_snippets:
+                snippets.extend(payment_snippets)
+            else:
                 snippets.append("Payment details depend on the selected service, and we can confirm the exact policy for you.")
 
         if any(token in text for token in ["cancel", "cancellation", "refund", "reschedule"]):
@@ -832,6 +940,10 @@ class BackendClient:
                 snippets.append(agent.cancellation_policy)
             else:
                 snippets.append("Cancellation terms depend on the appointment type, and we can confirm the latest policy for you.")
+
+        if "polic" in text and not any(token in text for token in ["payment", "pay", "deposit", "cancel", "cancellation", "refund"]):
+            policy_bits = [agent.cancellation_policy, agent.payment_policy, agent.deposit_policy]
+            snippets.extend([bit for bit in policy_bits if bit][:3])
 
         if any(token in text for token in ["where", "address", "location", "located"]):
             location_added = False
@@ -847,15 +959,7 @@ class BackendClient:
             if not location_added:
                 snippets.append("We can confirm the exact service area and address details for you.")
 
-        query_tokens = {
-            token
-            for token in re.findall(r"[a-zA-Z]{3,}", text)
-            if token not in {"what", "does", "your", "have", "with", "about", "need", "please"}
-        }
-        for question, answer in agent.faqs.items():
-            question_tokens = {token for token in re.findall(r"[a-zA-Z]{3,}", question.lower())}
-            if query_tokens and query_tokens.intersection(question_tokens):
-                snippets.append(answer)
+        snippets.extend(self._relevant_faq_answers(agent, query))
 
         if not snippets:
             if agent.business_description:
@@ -868,8 +972,9 @@ class BackendClient:
                 )
 
         return {
-            "answer": " ".join(snippets[:4]).strip(),
-            "suggested_services": [service.name for service in agent.service_catalog[:5]],
+            "answer": " ".join(snippets[:3]).strip(),
+            "suggested_services": [service.name for service in (matched_services or agent.service_catalog[:5])],
+            "matched_services": [service.name for service in matched_services],
         }
 
     def _find_service_in_catalog(self, answer: str, agent: AgentConfig) -> dict[str, Any] | None:

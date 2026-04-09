@@ -252,9 +252,9 @@ def test_call_report_returns_structured_payload(client):
 def test_search_phone_numbers_returns_matches(client):
     client.app.dependency_overrides.update({deps.get_twilio_client: lambda: _FakeTwilio()})
 
-    response = client.get(
+    response = client.post(
         "/api/v1/agent/phone-numbers/search",
-        params={"country_code": "CA", "number_type": "local", "area_code": 438, "limit": 5},
+        json={"country_code": "CA", "number_type": "local", "area_code": 438, "limit": 5},
     )
 
     assert response.status_code == 200
@@ -262,6 +262,21 @@ def test_search_phone_numbers_returns_matches(client):
     assert len(body) == 1
     assert body[0]["phone_number"] == "+14385335861"
     assert body[0]["locality"] == "Montreal"
+
+    client.app.dependency_overrides.clear()
+
+
+def test_search_phone_numbers_legacy_get_still_returns_matches(client):
+    client.app.dependency_overrides.update({deps.get_twilio_client: lambda: _FakeTwilio()})
+
+    response = client.get(
+        "/api/v1/agent/phone-numbers/search",
+        params={"country_code": "CA", "number_type": "local", "area_code": 438, "limit": 5},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body[0]["phone_number"] == "+14385335861"
 
     client.app.dependency_overrides.clear()
 

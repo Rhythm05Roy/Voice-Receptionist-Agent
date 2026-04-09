@@ -79,6 +79,14 @@ class AgentPhoneNumberProvisionRequest(BaseModel):
     identity_sid: str | None = Field(default=None, description="Twilio IdentitySid if required by regulation")
 
 
+class AgentPhoneNumberSearchRequest(BaseModel):
+    country_code: str = Field(default="CA", min_length=2, max_length=2, description="ISO 3166-1 alpha-2 country code")
+    number_type: Literal["local", "toll_free", "mobile"] = Field(default="local")
+    area_code: int | None = Field(default=None, ge=100, le=999)
+    contains: str | None = Field(default=None, min_length=2, max_length=16)
+    limit: int = Field(default=10, ge=1, le=20)
+
+
 class AgentPhoneNumberProvisionResponse(BaseModel):
     agent_id: str
     phone_number_sid: str

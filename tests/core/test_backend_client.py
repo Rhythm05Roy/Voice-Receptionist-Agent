@@ -112,3 +112,44 @@ def test_runtime_forwarding_overrides_agent_config():
 
     assert config.fallback_phone == "+97317000088"
     asyncio.run(backend.client.aclose())
+
+
+def test_build_business_query_answer_focuses_on_specific_service():
+    backend = _make_client()
+    config = asyncio.run(backend.fetch_agent_config("1"))
+
+    result = backend.build_business_query_answer(config, "Tell me about the special haircut service in detail")
+
+    assert "Special haircut" in result["answer"]
+    assert result["matched_services"] == ["Special haircut"]
+    assert "Urban Glow Salon offers" not in result["answer"]
+
+    asyncio.run(backend.client.aclose())
+
+
+def test_build_business_query_answer_avoids_irrelevant_faq_leakage_for_payment_questions():
+    backend = _make_client()
+    config = asyncio.run(backend.fetch_agent_config("1"))
+    config = config.model_copy(
+        update={
+            "payment_policy": "",
+            "deposit_policy": "A 30% deposit is required for bookings over 2 hours.",
+            "cancellation_policy": (
+                "Please provide 24-hour notice for cancellations. "
+                "Digital payments are accepted and refunds are processed within 3 business days."
+            ),
+            "faqs": {
+                "Do you have vegetarian options?": "Yes, we offer vegetarian dishes.",
+                "Do you offer delivery or takeaway?": "Yes, takeaway is available.",
+            },
+        }
+    )
+
+    result = backend.build_business_query_answer(config, "Do you accept digital payments and how do refunds work?")
+
+    assert "digital payments" in result["answer"].lower()
+    assert "refund" in result["answer"].lower()
+    assert "vegetarian" not in result["answer"].lower()
+    assert "takeaway" not in result["answer"].lower()
+
+    asyncio.run(backend.client.aclose())

@@ -69,6 +69,13 @@ class _Backend:
                     "base_price_bhd": "12-45 BHD",
                     "keywords": ["cleaning", "deep clean"],
                 },
+                {
+                    "service_id": "salon_home",
+                    "name": "At-Home Salon",
+                    "description": "Haircut, beard trim, and basic grooming at customer location.",
+                    "base_price_bhd": "8-25 BHD",
+                    "keywords": ["salon", "haircut", "grooming"],
+                },
             ],
             faqs={
                 "services": "We provide AC repair and deep cleaning.",
@@ -121,6 +128,34 @@ class _LLM:
         """Simulate GPT-4o responses with function calling."""
         self.call_count += 1
         text = user_message.lower().strip()
+
+        if "about yourself" in text or "tell about yourself" in text:
+            return {
+                "response_text": "We are Bahrain HomeCare Group, and we help with AC repair, deep cleaning, at-home salon, and general maintenance across Bahrain.",
+                "tool_calls": [],
+                "raw_message": None,
+            }
+
+        if "at home salon" in text and any(token in text for token in ["about", "detail", "details"]):
+            return {
+                "response_text": "Our at-home salon service includes haircut, beard trim, and basic grooming at your location. Pricing starts from 8-25 BHD depending on the requested service.",
+                "tool_calls": [],
+                "raw_message": None,
+            }
+
+        if "book" in text and any(token in text for token in ["haircut", "salon"]):
+            return {
+                "response_text": "Great! Where are you located?",
+                "tool_calls": [],
+                "raw_message": None,
+            }
+
+        if "riffa" in text:
+            return {
+                "response_text": "Thanks. What time works best for your appointment?",
+                "tool_calls": [],
+                "raw_message": None,
+            }
 
         # Booking-related: if user mentions booking + all required fields
         if "book" in text and "cleaning" in text and "manama" in text:
@@ -182,6 +217,16 @@ class _LLM:
                 }],
                 "raw_message": _FakeRawMessage("transfer_to_human", {"reason": "Caller requested human agent"}),
             }
+
+        if "TURN-SPECIFIC FACTS:" in system_prompt:
+            marker = "- Use these business facts for this reply:"
+            if marker in system_prompt:
+                facts = system_prompt.split(marker, 1)[1].split("\n", 1)[0].strip()
+                return {
+                    "response_text": facts,
+                    "tool_calls": [],
+                    "raw_message": None,
+                }
 
         # General conversation — no tool calls
         return {
@@ -279,12 +324,46 @@ def test_general_conversation():
 def test_business_info_query_uses_deterministic_context():
     engine, _, llm = _make_engine()
     asyncio.run(engine.start_session("call-002b"))
-    result = asyncio.run(engine.process_user_input("call-002b", "Tell me about your pricing and business hours"))
+    result = asyncio.run(engine.process_user_input("call-002b", "pricing and business hours"))
 
     assert result["action"] == "speak"
     assert "Pricing depends" in result["text_to_speak"] or "Current pricing includes" in result["text_to_speak"]
     assert "hours" in result["text_to_speak"].lower()
     assert llm.call_count == 0
+
+
+def test_service_specific_business_query_uses_llm_with_context():
+    engine, _, llm = _make_engine()
+    asyncio.run(engine.start_session("call-002bb"))
+    result = asyncio.run(engine.process_user_input("call-002bb", "I want to know about your at home salon service in detail"))
+
+    assert result["action"] == "speak"
+    assert "at-home salon service" in result["text_to_speak"].lower()
+    assert "ac repair" not in result["text_to_speak"].lower()
+    assert llm.call_count == 1
+
+
+def test_about_yourself_query_uses_llm_not_canned_fast_path():
+    engine, _, llm = _make_engine()
+    asyncio.run(engine.start_session("call-002bc"))
+    result = asyncio.run(engine.process_user_input("call-002bc", "Can you tell about yourself?"))
+
+    assert result["action"] == "speak"
+    assert "bahrain homecare group" in result["text_to_speak"].lower()
+    assert llm.call_count == 1
+
+
+def test_booking_follow_up_answer_is_not_hijacked_by_business_info_fast_path():
+    engine, _, llm = _make_engine()
+    asyncio.run(engine.start_session("call-002c"))
+
+    first_turn = asyncio.run(engine.process_user_input("call-002c", "I want to book a haircut at my place"))
+    second_turn = asyncio.run(engine.process_user_input("call-002c", "My location is Bahrain and Riffa city"))
+
+    assert "where are you located" in first_turn["text_to_speak"].lower()
+    assert "what time works best" in second_turn["text_to_speak"].lower()
+    assert "we are located at or serve" not in second_turn["text_to_speak"].lower()
+    assert llm.call_count == 2
 
 
 # ── Test: booking triggers submit_booking tool ───────────────────

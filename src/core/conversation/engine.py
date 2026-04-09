@@ -15,6 +15,7 @@ and multi-intent turns naturally.
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from typing import Any, Protocol
@@ -207,6 +208,7 @@ class ConversationEngine:
 
         # Record user turn
         session.add_message("user", text)
+        self._update_active_intent_from_user_text(session, text)
 
         logger.bind(call_id=call_id).debug(
             "Processing turn",
@@ -228,7 +230,8 @@ class ConversationEngine:
                 "transfer_number": None,
             }
 
-        deterministic_response = self._try_business_info_response(session, text)
+        business_context = self._get_business_context_for_turn(session, text)
+        deterministic_response = self._try_business_info_response(session, text, business_context)
         if deterministic_response is not None:
             session.state["interaction_type"] = session.state.get("interaction_type") or "query"
             queries = session.state.setdefault("queries", [])
@@ -245,7 +248,7 @@ class ConversationEngine:
             return deterministic_response
 
         try:
-            response = await self._llm_turn(session, text)
+            response = await self._llm_turn(session, text, business_context=business_context)
         except Exception:  # noqa: BLE001
             logger.bind(call_id=call_id).exception("LLM turn failed")
             response = {
@@ -290,13 +293,87 @@ class ConversationEngine:
             ttl_seconds=self.context_refresh_ttl_seconds,
         )
 
+    def _update_active_intent_from_user_text(self, session: CallSession, user_text: str) -> None:
+        text = user_text.lower()
+        booking_tokens = {"book", "booking", "appointment", "reserve", "schedule"}
+        tracking_tokens = {"track", "status", "booking id", "reference"}
+        transfer_tokens = {"transfer", "human", "agent"}
+
+        if any(token in text for token in booking_tokens):
+            session.state["active_intent"] = "booking"
+            return
+        if any(token in text for token in tracking_tokens):
+            session.state["active_intent"] = "tracking"
+            return
+        if any(token in text for token in transfer_tokens):
+            session.state["active_intent"] = "transfer"
+
+    def _booking_flow_in_progress(self, session: CallSession, user_text: str) -> bool:
+        if session.state.get("active_intent") == "booking" and not session.state.get("booking_completed"):
+            return True
+
+        interaction_type = session.state.get("interaction_type")
+        if interaction_type == "booking" and not session.state.get("booking_completed"):
+            return True
+
+        last_assistant_message = next(
+            (
+                item.get("content", "")
+                for item in reversed(session.conversation_history[:-1])
+                if item.get("role") == "assistant" and item.get("content")
+            ),
+            "",
+        ).lower()
+        booking_slot_prompts = {
+            "where are you located",
+            "which area are you located",
+            "what is your location",
+            "what area are you in",
+            "when should we visit",
+            "what time works best",
+            "preferred time",
+            "preferred date",
+            "what date works",
+            "your name",
+            "phone number",
+            "contact number",
+        }
+        if any(prompt in last_assistant_message for prompt in booking_slot_prompts):
+            return True
+
+        text = user_text.lower()
+        booking_answer_patterns = {
+            "my location is",
+            "i am in",
+            "i'm in",
+            "located in",
+            "my area is",
+            "my city is",
+            "for tomorrow",
+            "for today",
+            "at 12",
+            "at 1",
+            "at 2",
+            "at 3",
+            "at 4",
+            "at 5",
+            "at 6",
+            "in the morning",
+            "in the evening",
+        }
+        return any(pattern in text for pattern in booking_answer_patterns)
+
     def _try_business_info_response(
         self,
         session: CallSession,
         user_text: str,
+        business_context: dict[str, Any] | None = None,
     ) -> dict[str, str | None] | None:
         text = user_text.lower().strip()
         if not text:
+            return None
+
+        if self._booking_flow_in_progress(session, user_text):
             return None
 
         booking_tokens = {
@@ -347,11 +424,9 @@ class ConversationEngine:
         if not any(token in text for token in business_info_tokens):
             return None
 
-        builder = getattr(self.backend_client, "build_business_query_answer", None)
-        if callable(builder):
-            result = builder(session.agent_config, user_text)
-        else:
-            result = self._build_business_info_response(session, text)
+        result = business_context or self._get_business_context_for_turn(session, user_text)
+        if self._should_route_business_query_to_llm(session, user_text, result):
+            return None
         answer = (result.get("answer") or "").strip()
         if not answer:
             return None
@@ -361,6 +436,63 @@ class ConversationEngine:
             "text_to_speak": answer,
             "transfer_number": None,
         }
+
+    def _get_business_context_for_turn(self, session: CallSession, user_text: str) -> dict[str, Any] | None:
+        builder = getattr(self.backend_client, "build_business_query_answer", None)
+        if callable(builder):
+            result = builder(session.agent_config, user_text)
+        else:
+            result = self._build_business_info_response(session, user_text.lower())
+        return result if result and result.get("answer") else None
+
+    def _should_route_business_query_to_llm(
+        self,
+        session: CallSession,
+        user_text: str,
+        business_context: dict[str, Any] | None,
+    ) -> bool:
+        if not business_context:
+            return False
+
+        text = user_text.lower()
+        conversational_markers = {
+            "tell me",
+            "can you tell",
+            "about yourself",
+            "about it",
+            "in detail",
+            "details",
+            "explain",
+            "more about",
+            "sorry",
+            "interrupt",
+            "help me understand",
+        }
+        if any(marker in text for marker in conversational_markers):
+            return True
+
+        if business_context.get("matched_services"):
+            return True
+
+        if session.state.get("active_intent") in {"booking", "tracking", "transfer"}:
+            return True
+
+        words = [token for token in re.findall(r"[a-zA-Z]{2,}", text)]
+        terse_fact_tokens = {
+            "price", "pricing", "hours", "hour", "open", "close", "timing", "services", "service",
+            "address", "location", "where", "payment", "payments", "deposit", "refund",
+            "cancellation", "cancel", "policy", "policies", "business", "email", "website", "and",
+        }
+        if len(words) <= 4 and set(words).issubset(terse_fact_tokens):
+            return False
+
+        if any(text.startswith(prefix) for prefix in ("what", "how", "can", "do", "does", "is", "are", "tell", "explain")):
+            return True
+
+        if len(words) > 5:
+            return True
+
+        return False
 
     def _build_business_info_response(self, session: CallSession, text: str) -> dict[str, str]:
         agent = session.agent_config
@@ -423,20 +555,37 @@ class ConversationEngine:
 
         return {"answer": " ".join(snippets[:4]).strip()}
 
-    async def _llm_turn(self, session: CallSession, user_text: str) -> dict[str, str | None]:
-        """Core LLM interaction — handles text responses and tool calls."""
+    async def _llm_turn(
+        self,
+        session: CallSession,
+        user_text: str,
+        business_context: dict[str, Any] | None = None,
+    ) -> dict[str, str | None]:
+        """Core LLM interaction for text responses and tool calls."""
 
-        # Call GPT with full conversation + tools
+        system_prompt = session.system_prompt
+        if business_context and business_context.get("answer"):
+            factual_lines = [
+                "TURN-SPECIFIC FACTS:",
+                f"- Use these business facts for this reply: {business_context['answer']}",
+                "- Use the facts above, but answer naturally and conversationally.",
+            ]
+            matched_services = business_context.get("matched_services") or []
+            if matched_services:
+                factual_lines.append(
+                    f"- The caller is asking specifically about: {', '.join(matched_services)}. Focus on that service instead of listing the full catalog."
+                )
+            system_prompt = f"{system_prompt}\n\n" + "\n".join(factual_lines)
+
         result = await self.llm_client.conversation_turn(
-            system_prompt=session.system_prompt,
-            conversation_history=session.conversation_history[:-1],  # exclude the latest user msg (already in call)
+            system_prompt=system_prompt,
+            conversation_history=session.conversation_history[:-1],
             user_message=user_text,
         )
 
         response_text = result.get("response_text", "")
         tool_calls = result.get("tool_calls", [])
 
-        # If no tool calls, just return the text response
         if not tool_calls:
             session.state["interaction_type"] = session.state.get("interaction_type") or "query"
             return {
@@ -445,7 +594,6 @@ class ConversationEngine:
                 "transfer_number": None,
             }
 
-        # Process tool calls
         tool_results: list[dict[str, Any]] = []
         final_action = "speak"
         transfer_number = None
@@ -463,16 +611,12 @@ class ConversationEngine:
                 "output": tool_output,
             })
 
-            # Check for special actions
             if tc["name"] == "end_call":
                 final_action = "hangup"
             elif tc["name"] == "transfer_to_human":
                 final_action = "transfer"
                 transfer_number = tool_output.get("transfer_number")
 
-        # ── Persist tool calls + results into conversation history ──
-        # This is CRITICAL: without this, the LLM forgets bookings and
-        # re-calls submit_booking when the user asks to repeat info.
         raw_message = result.get("raw_message")
         assistant_msg: dict[str, Any] = {"role": "assistant"}
         if response_text:
@@ -493,10 +637,8 @@ class ConversationEngine:
                 for tc_raw in raw_message.tool_calls
             ]
 
-        # Add assistant message with tool calls to history
         session.conversation_history.append(assistant_msg)
 
-        # Add each tool result to history
         for tr in tool_results:
             import json as _json
             session.conversation_history.append({
@@ -505,17 +647,15 @@ class ConversationEngine:
                 "content": _json.dumps(tr["output"]),
             })
 
-        # Send tool results back to GPT for natural follow-up
         try:
             follow_up = await self.llm_client.continue_after_tool(
-                system_prompt=session.system_prompt,
+                system_prompt=system_prompt,
                 conversation_history=session.conversation_history[:-len(tool_results) - 1],
                 tool_call_message=assistant_msg,
                 tool_results=tool_results,
             )
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning("Failed to get follow-up after tools, using default")
-            # Fallback: construct response from tool outputs
             messages = []
             for tr in tool_results:
                 msg = tr["output"].get("message", "")
