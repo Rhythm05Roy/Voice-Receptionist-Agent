@@ -56,7 +56,13 @@ class IntakeQuestion(BaseModel):
             if question:
                 raw["question"] = str(question)
             key = raw.get("key") or raw.get("id")
-            if not key and question:
+            if key not in (None, ""):
+                key_text = str(key).strip()
+                if question and key_text.isdigit():
+                    raw["key"] = cls._slug(str(question))
+                else:
+                    raw["key"] = cls._slug(key_text)
+            elif question:
                 raw["key"] = cls._slug(str(question))
             answer_type = raw.get("answer_type") or raw.get("answerType")
             if answer_type:
@@ -76,7 +82,7 @@ class IntakeQuestion(BaseModel):
                 raw["ask_when"] = text
             tags = raw.get("service_tags") or raw.get("serviceTags") or raw.get("specific_services")
             if tags is not None:
-                raw["service_tags"] = list(tags)
+                raw["service_tags"] = [str(item) for item in tags]
             categories = raw.get("specific_categories")
             if categories is not None:
                 raw["specific_categories"] = [str(item) for item in categories]

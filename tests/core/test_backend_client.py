@@ -52,17 +52,76 @@ BUSINESS_PAYLOAD = [
     }
 ]
 
+INTAKE_PAYLOAD = [
+    {
+        "business": 1,
+        "question": "Are you currently pregnant or under medical treatment that may affect skin treatments?",
+        "answer_type": "yes_no",
+        "when_to_ask": "tagged_services",
+        "specific_categories": [2],
+        "is_required": True,
+        "is_active": True,
+        "disqualification_rules": [
+            {
+                "disqualifying_value": "yes",
+                "message_to_caller": "Certain skin treatments may not be suitable during pregnancy or medical treatment. Please consult staff before booking.",
+            }
+        ],
+    }
+]
+
+LANGUAGE_PAYLOAD = [
+    {"business": 1, "language_code": "en", "is_selected": True, "is_default": True},
+    {"business": 1, "language_code": "ar", "is_selected": True, "is_default": False},
+]
+
+VOICE_PAYLOAD = [
+    {"business": 1, "language_code": "en", "voice_id": "voice-en-123", "is_selected": True},
+    {"business": 1, "language_code": "ar", "voice_id": "voice-ar-456", "is_selected": True},
+]
+
 
 def _make_client() -> BackendClient:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert str(request.url) == "http://example.test/api/business/businesses/"
-        return httpx.Response(200, json=BUSINESS_PAYLOAD)
+        url = str(request.url)
+        if url == "http://example.test/api/business/businesses/":
+            return httpx.Response(200, json=BUSINESS_PAYLOAD)
+        if url == "http://example.test/api/agent/intake-questions/":
+            return httpx.Response(200, json=INTAKE_PAYLOAD)
+        if url == "http://example.test/api/agent/languages/":
+            return httpx.Response(200, json=LANGUAGE_PAYLOAD)
+        if url == "http://example.test/api/agent/agent-voices/":
+            return httpx.Response(200, json=VOICE_PAYLOAD)
+        raise AssertionError(f"Unexpected URL: {url}")
 
     transport = httpx.MockTransport(handler)
     client = httpx.AsyncClient(transport=transport)
     return BackendClient(
         client=client,
         base_url="http://example.test/api/business/businesses/",
+        api_key="",
+        local_test_mode=False,
+    )
+
+
+def _make_root_client() -> BackendClient:
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if url == "http://example.test/api/business/businesses/":
+            return httpx.Response(200, json=BUSINESS_PAYLOAD)
+        if url == "http://example.test/api/agent/intake-questions/":
+            return httpx.Response(200, json=INTAKE_PAYLOAD)
+        if url == "http://example.test/api/agent/languages/":
+            return httpx.Response(200, json=LANGUAGE_PAYLOAD)
+        if url == "http://example.test/api/agent/agent-voices/":
+            return httpx.Response(200, json=VOICE_PAYLOAD)
+        raise AssertionError(f"Unexpected URL: {url}")
+
+    transport = httpx.MockTransport(handler)
+    client = httpx.AsyncClient(transport=transport)
+    return BackendClient(
+        client=client,
+        base_url="http://example.test/",
         api_key="",
         local_test_mode=False,
     )
@@ -78,6 +137,22 @@ def test_fetch_agent_config_from_business_catalog():
     assert config.service_catalog[0].base_price == "500.00"
     assert config.cancellation_policy.startswith("Please provide 24-hour notice")
     assert "Do I need an appointment?" in config.faqs
+    assert config.supported_languages == ["en", "ar"]
+    assert config.default_greeting_language == "en"
+    assert config.language_voice_map == {"en": "voice-en-123", "ar": "voice-ar-456"}
+    assert config.intake_questions[0].question.startswith("Are you currently pregnant")
+
+    asyncio.run(backend.client.aclose())
+
+
+def test_fetch_agent_config_from_api_root_base_url():
+    backend = _make_root_client()
+    config = asyncio.run(backend.fetch_agent_config("1"))
+
+    assert config.agent_id == "1"
+    assert config.business_name == "Urban Glow Salon"
+    assert config.supported_languages == ["en", "ar"]
+    assert config.language_voice_map == {"en": "voice-en-123", "ar": "voice-ar-456"}
 
     asyncio.run(backend.client.aclose())
 
@@ -90,6 +165,19 @@ def test_fetch_agent_ui_context_from_business_catalog():
     assert payload["services"][0]["name"] == "Special haircut"
     assert "Thu:" in payload["business_hours"]
     assert payload["payment_policy"].startswith("We accept all major credit cards")
+    assert payload["supported_languages"] == ["en", "ar"]
+    assert payload["intake_questions"][0]["answer_type"] == "yes_no"
+
+    asyncio.run(backend.client.aclose())
+
+
+def test_fetch_intake_question_configs_from_business_catalog_agent_routes():
+    backend = _make_client()
+
+    questions = asyncio.run(backend.fetch_intake_question_configs("1"))
+
+    assert questions[0]["question"].startswith("Are you currently pregnant")
+    assert questions[0]["when_to_ask"] == "tagged_services"
 
     asyncio.run(backend.client.aclose())
 

@@ -209,6 +209,7 @@ class ConversationEngine:
         # Record user turn
         session.add_message("user", text)
         self._update_active_intent_from_user_text(session, text)
+        await self._update_language_preference(session, text)
 
         logger.bind(call_id=call_id).debug(
             "Processing turn",
@@ -233,6 +234,10 @@ class ConversationEngine:
         business_context = self._get_business_context_for_turn(session, text)
         deterministic_response = self._try_business_info_response(session, text, business_context)
         if deterministic_response is not None:
+            deterministic_response["text_to_speak"] = await self._render_response_for_language(
+                session,
+                deterministic_response["text_to_speak"] or "",
+            )
             session.state["interaction_type"] = session.state.get("interaction_type") or "query"
             queries = session.state.setdefault("queries", [])
             queries.append({"text": text, "type": "business_info"})
@@ -259,6 +264,10 @@ class ConversationEngine:
 
         # Record assistant response
         if response.get("text_to_speak"):
+            response["text_to_speak"] = await self._render_response_for_language(
+                session,
+                response["text_to_speak"] or "",
+            )
             session.add_message("assistant", response["text_to_speak"])
 
         await self.sessions.save(session)
@@ -272,6 +281,64 @@ class ConversationEngine:
         )
 
         return response
+
+    async def _update_language_preference(self, session: CallSession, user_text: str) -> None:
+        text = (user_text or "").strip()
+        if not text:
+            return
+
+        supported_languages = list(session.agent_config.supported_languages or [])
+        default_language = (
+            session.preferred_language
+            or session.agent_config.default_greeting_language
+            or session.agent_config.language
+            or "en"
+        ).lower()
+        if not supported_languages:
+            supported_languages = [default_language]
+        if len(supported_languages) == 1 and supported_languages[0] == default_language:
+            return
+
+        detector = getattr(self.llm_client, "detect_language_preference", None)
+        if not callable(detector):
+            return
+
+        try:
+            detected = await detector(text, supported_languages, default_language)
+        except Exception:  # noqa: BLE001
+            logger.bind(call_id=session.call_id).warning("Language detection failed")
+            return
+
+        detected = (detected or default_language).lower()
+        if detected not in supported_languages:
+            return
+        if detected != session.preferred_language:
+            session.preferred_language = detected
+            customer_details = session.state.setdefault("customer_details", {})
+            customer_details["language"] = detected
+
+    async def _render_response_for_language(self, session: CallSession, text: str) -> str:
+        if not text:
+            return text
+
+        preferred_language = (session.preferred_language or "").lower()
+        default_language = (
+            session.agent_config.default_greeting_language
+            or session.agent_config.language
+            or "en"
+        ).lower()
+        if not preferred_language or preferred_language == default_language:
+            return text
+
+        rewriter = getattr(self.llm_client, "rewrite_confirmation", None)
+        if not callable(rewriter):
+            return text
+
+        try:
+            return await rewriter(text, caller_language_hint=preferred_language)
+        except Exception:  # noqa: BLE001
+            logger.bind(call_id=session.call_id).warning("Language rewrite failed")
+            return text
 
     async def _refresh_session_context_if_stale(self, session: CallSession) -> None:
         now = time.monotonic()
@@ -564,6 +631,12 @@ class ConversationEngine:
         """Core LLM interaction for text responses and tool calls."""
 
         system_prompt = session.system_prompt
+        preferred_language = session.preferred_language or session.agent_config.default_greeting_language or session.agent_config.language or "en"
+        system_prompt = (
+            f"{system_prompt}\n\n"
+            f"CURRENT CALLER LANGUAGE: {preferred_language}.\n"
+            "Reply in the caller's current language unless they explicitly ask to switch."
+        )
         if business_context and business_context.get("answer"):
             factual_lines = [
                 "TURN-SPECIFIC FACTS:",

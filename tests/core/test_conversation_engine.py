@@ -256,7 +256,15 @@ class _LLM:
                 return output.get("message", "That location is outside our service area.")
         return "Done. Is there anything else I can help with?"
 
+    async def detect_language_preference(self, user_input: str, supported_languages: list[str], default_language: str) -> str:
+        lowered = user_input.lower()
+        if "arabic" in lowered or any("\u0600" <= ch <= "\u06FF" for ch in user_input):
+            return "ar" if "ar" in supported_languages else default_language
+        return "en" if "en" in supported_languages else default_language
+
     async def rewrite_confirmation(self, text: str, caller_language_hint: str = "en") -> str:
+        if caller_language_hint == "ar":
+            return f"[ar] {text}"
         return text
 
 
@@ -364,6 +372,18 @@ def test_booking_follow_up_answer_is_not_hijacked_by_business_info_fast_path():
     assert "what time works best" in second_turn["text_to_speak"].lower()
     assert "we are located at or serve" not in second_turn["text_to_speak"].lower()
     assert llm.call_count == 2
+
+
+def test_language_preference_updates_from_supported_language_route_data():
+    engine, _, _ = _make_engine()
+    asyncio.run(engine.start_session("call-002d"))
+
+    result = asyncio.run(engine.process_user_input("call-002d", "Please speak in Arabic"))
+    session = asyncio.run(engine.sessions.get("call-002d"))
+
+    assert session is not None
+    assert session.preferred_language == "ar"
+    assert result["text_to_speak"].startswith("[ar] ")
 
 
 # ── Test: booking triggers submit_booking tool ───────────────────

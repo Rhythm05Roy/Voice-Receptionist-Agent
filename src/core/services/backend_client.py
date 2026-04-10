@@ -6,6 +6,7 @@ import re
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from httpx import AsyncClient, HTTPError, HTTPStatusError, TimeoutException
 from loguru import logger
@@ -71,11 +72,31 @@ class BackendClient:
         }
         return self.local_test_mode or any(host in self.base_url for host in placeholder_hosts)
 
+    def _is_api_root_base(self) -> bool:
+        parsed = urlsplit(self.base_url)
+        path = (parsed.path or "").rstrip("/")
+        return path in {"", "/api"}
+
     def _is_business_catalog_endpoint(self) -> bool:
-        return "/api/business/businesses" in self.base_url.lower()
+        base = self.base_url.lower()
+        return "/api/business/businesses" in base or self._is_api_root_base()
 
     def _business_catalog_url(self) -> str:
-        return self.base_url if self.base_url.endswith("/") else f"{self.base_url}/"
+        if "/api/business/businesses" in self.base_url.lower():
+            return self.base_url if self.base_url.endswith("/") else f"{self.base_url}/"
+        return self._agent_route_url("/api/business/businesses/")
+
+    def _api_root_url(self) -> str:
+        parsed = urlsplit(self.base_url)
+        path = parsed.path or ""
+        if path.rstrip("/") == "/api":
+            path = ""
+        if "/api/" in path:
+            path = path.split("/api/", 1)[0]
+        return f"{parsed.scheme}://{parsed.netloc}{path}".rstrip("/")
+
+    def _agent_route_url(self, path: str) -> str:
+        return f"{self._api_root_url()}{path}"
 
     def _dummy_db_path(self) -> Path:
         configured = os.getenv("DUMMY_DB_PATH", "").strip()
@@ -658,6 +679,206 @@ class BackendClient:
         payload = await self._get(self._business_catalog_url())
         return self._select_business_payload(payload, agent_id)
 
+    @staticmethod
+    def _collection_items(payload: Any, candidate_keys: tuple[str, ...]) -> list[Any]:
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            for key in candidate_keys:
+                value = payload.get(key)
+                if isinstance(value, list):
+                    return value
+            return [payload]
+        return []
+
+    @staticmethod
+    def _normalize_language_code(value: str | None) -> str:
+        raw = str(value or "").strip().lower()
+        aliases = {
+            "english": "en",
+            "arabic": "ar",
+            "french": "fr",
+            "spanish": "es",
+            "hindi": "hi",
+            "russian": "ru",
+            "german": "de",
+            "bengali": "bn",
+            "bangla": "bn",
+        }
+        return aliases.get(raw, raw)
+
+    def _matches_business_context(self, item: dict[str, Any], *, agent_id: str | None, business_payload: dict[str, Any]) -> bool:
+        targets = {
+            str(value)
+            for value in (
+                agent_id,
+                business_payload.get("id"),
+                business_payload.get("agent_id"),
+                business_payload.get("owner"),
+                business_payload.get("owner_id"),
+            )
+            if value not in (None, "")
+        }
+        candidate_keys = (
+            "agent_id",
+            "agent",
+            "business_id",
+            "business",
+            "business_owner",
+            "owner",
+            "owner_id",
+        )
+        candidate_values = [str(item.get(key)) for key in candidate_keys if item.get(key) not in (None, "")]
+        if not candidate_values:
+            return True
+        return any(value in targets for value in candidate_values)
+
+    async def _fetch_catalog_intake_question_configs(
+        self,
+        agent_id: str | None,
+        business_payload: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        url = self._agent_route_url("/api/agent/intake-questions/")
+        payload = await self._get(url)
+        items = self._collection_items(payload, ("questions", "results", "data", "items"))
+        question_items: list[dict[str, Any]] = []
+
+        for raw_item in items:
+            if not isinstance(raw_item, dict):
+                continue
+            if not self._matches_business_context(raw_item, agent_id=agent_id, business_payload=business_payload):
+                continue
+            if any(key in raw_item for key in ("question", "question_text", "text")):
+                question_items.append(dict(raw_item))
+                continue
+            for nested_key in ("intake_question", "config"):
+                nested = raw_item.get(nested_key)
+                if isinstance(nested, dict) and any(key in nested for key in ("question", "question_text", "text")):
+                    question_items.append(dict(nested))
+                    break
+
+        return question_items
+
+    async def _fetch_catalog_language_settings(
+        self,
+        agent_id: str | None,
+        business_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        url = self._agent_route_url("/api/agent/languages/")
+        payload = await self._get(url)
+        items = self._collection_items(payload, ("languages", "results", "data", "items"))
+
+        supported_languages: list[str] = []
+        default_language: str | None = None
+        multilingual_enabled = False
+
+        for raw_item in items:
+            if isinstance(raw_item, str):
+                code = self._normalize_language_code(raw_item)
+                if code:
+                    supported_languages.append(code)
+                    multilingual_enabled = True
+                continue
+
+            if not isinstance(raw_item, dict):
+                continue
+            if not self._matches_business_context(raw_item, agent_id=agent_id, business_payload=business_payload):
+                continue
+
+            code = self._normalize_language_code(
+                raw_item.get("language_code")
+                or raw_item.get("code")
+                or raw_item.get("language")
+                or raw_item.get("name")
+            )
+            is_selected = raw_item.get("is_selected", raw_item.get("selected", raw_item.get("enabled", raw_item.get("is_active", True))))
+            is_default = raw_item.get("is_default", raw_item.get("default", False))
+
+            if code and is_selected:
+                supported_languages.append(code)
+                multilingual_enabled = True
+            if code and is_default:
+                default_language = code
+
+        unique_supported = [code for code in dict.fromkeys(supported_languages) if code]
+        return {
+            "supported_languages": unique_supported,
+            "default_greeting_language": default_language or (unique_supported[0] if unique_supported else None),
+            "language": default_language or (unique_supported[0] if unique_supported else None),
+            "multilingual_enabled": multilingual_enabled or len(unique_supported) > 1,
+        }
+
+    async def _fetch_catalog_voice_map(
+        self,
+        agent_id: str | None,
+        business_payload: dict[str, Any],
+    ) -> dict[str, str]:
+        url = self._agent_route_url("/api/agent/agent-voices/")
+        payload = await self._get(url)
+        items = self._collection_items(payload, ("voices", "results", "data", "items"))
+        voice_map: dict[str, str] = {}
+
+        for raw_item in items:
+            if not isinstance(raw_item, dict):
+                continue
+            if not self._matches_business_context(raw_item, agent_id=agent_id, business_payload=business_payload):
+                continue
+
+            voice_id = str(
+                raw_item.get("voice_id")
+                or raw_item.get("elevenlabs_voice_id")
+                or raw_item.get("voice")
+                or ""
+            ).strip()
+            if not voice_id:
+                continue
+
+            code = self._normalize_language_code(
+                raw_item.get("language_code")
+                or raw_item.get("code")
+                or raw_item.get("language")
+                or raw_item.get("name")
+            )
+            if not code:
+                code = "en"
+            if raw_item.get("is_selected", raw_item.get("selected", raw_item.get("enabled", raw_item.get("is_active", True)))):
+                voice_map[code] = voice_id
+
+        return voice_map
+
+    async def _enrich_business_catalog_config(
+        self,
+        normalized: dict[str, Any],
+        *,
+        agent_id: str | None,
+        business_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        enriched = dict(normalized)
+
+        try:
+            intake_questions = await self._fetch_catalog_intake_question_configs(agent_id, business_payload)
+            if intake_questions:
+                enriched["intake_questions"] = intake_questions
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to fetch external intake questions; using business defaults", agent_id=agent_id)
+
+        try:
+            language_settings = await self._fetch_catalog_language_settings(agent_id, business_payload)
+            for key, value in language_settings.items():
+                if value not in (None, [], {}):
+                    enriched[key] = value
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to fetch external language settings; using business defaults", agent_id=agent_id)
+
+        try:
+            voice_map = await self._fetch_catalog_voice_map(agent_id, business_payload)
+            if voice_map:
+                enriched["language_voice_map"] = voice_map
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to fetch external voice settings; using default ElevenLabs voice", agent_id=agent_id)
+
+        return enriched
+
     @retry(
         reraise=True,
         retry=retry_if_exception(_retryable),
@@ -757,7 +978,13 @@ class BackendClient:
         if self._is_business_catalog_endpoint():
             try:
                 payload = await self._fetch_business_catalog_record(agent_id)
-                return self._apply_runtime_overrides(AgentConfig(**self._normalize_business_record(payload)))
+                normalized = self._normalize_business_record(payload)
+                normalized = await self._enrich_business_catalog_config(
+                    normalized,
+                    agent_id=agent_id,
+                    business_payload=payload,
+                )
+                return self._apply_runtime_overrides(AgentConfig(**normalized))
             except Exception:  # noqa: BLE001
                 logger.warning("Falling back to local dummy agent config", agent_id=agent_id)
                 return self._fallback_agent_config(agent_id)
@@ -779,9 +1006,20 @@ class BackendClient:
         return [item.question for item in config.intake_questions]
 
     async def fetch_intake_question_configs(self, agent_id: str | None = None) -> list[dict[str, Any]]:
-        if not agent_id or self._local_fallback_enabled() or self._is_business_catalog_endpoint():
+        if not agent_id or self._local_fallback_enabled():
             config = await self.fetch_agent_config(agent_id)
             return [item.model_dump() for item in config.intake_questions]
+
+        if self._is_business_catalog_endpoint():
+            try:
+                payload = await self._fetch_business_catalog_record(agent_id)
+                questions = await self._fetch_catalog_intake_question_configs(agent_id, payload)
+                if questions:
+                    return questions
+            except Exception:  # noqa: BLE001
+                logger.warning("Failed to fetch catalog intake questions; using business defaults", agent_id=agent_id)
+            normalized = self._normalize_business_record(await self._fetch_business_catalog_record(agent_id))
+            return [item.model_dump() for item in AgentConfig(**normalized).intake_questions]
 
         url = f"{self.base_url}/agents/{agent_id}/intake-questions"
         try:
@@ -800,8 +1038,7 @@ class BackendClient:
 
         if self._is_business_catalog_endpoint():
             try:
-                payload = await self._fetch_business_catalog_record(agent_id)
-                agent = self._apply_runtime_overrides(AgentConfig(**self._normalize_business_record(payload)))
+                agent = await self.fetch_agent_config(agent_id)
                 return self._agent_to_ui_context(agent)
             except Exception:  # noqa: BLE001
                 logger.warning("Falling back to local UI context", agent_id=agent_id)
