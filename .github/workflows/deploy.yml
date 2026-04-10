@@ -5,8 +5,8 @@ on:
     branches: ["main"]
 
 env:
-  IMAGE: softvence/ahmed-ai
-  DEPLOY_PATH: /home/ubuntu/ahmed-ai
+  IMAGE: softvence/voice-receptionist-agent-ai
+  DEPLOY_PATH: /home/ubuntu/ai
 
 jobs:
   build-push:
