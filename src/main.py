@@ -122,6 +122,12 @@ register_exception_handlers(app)
 app.include_router(api_router, prefix=settings.api_v1_prefix)
 
 
+@app.get("/")
+async def root():
+    """Root endpoint."""
+    return {"message": "AI Voice Service is running"}
+
+
 @app.get("/health")
 async def health():
     """Health check with dependency status."""
