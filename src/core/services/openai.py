@@ -321,10 +321,10 @@ class OpenAIClient:
         """Simple one-shot generation without tools."""
         try:
             completion = await self.client.chat.completions.create(
-                model=self.model,
+                model=self.fast_model,
                 messages=list(messages),
                 temperature=0.55,
-                max_tokens=320,
+                max_tokens=200,
             )
             reply = completion.choices[0].message.content or ""
             return reply.strip()
@@ -361,7 +361,7 @@ class OpenAIClient:
         ]
         try:
             completion = await self.client.chat.completions.create(
-                model=self.model,
+                model=self.fast_model,
                 messages=messages,
                 temperature=0,
                 max_tokens=50,

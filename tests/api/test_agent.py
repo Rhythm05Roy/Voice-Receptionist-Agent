@@ -113,7 +113,15 @@ class _FakeBackend:
 class _FakeTwilio:
     credentials_available = True
 
+    def __init__(self):
+        self.search_calls = []
+
     def search_available_numbers(self, **kwargs) -> list[dict]:
+        self.search_calls.append(kwargs)
+        if kwargs.get("area_code") == 548 and kwargs.get("contains") == "9999":
+            return []
+        if kwargs.get("area_code") == 548:
+            return []
         return [
             {
                 "phone_number": "+14385335861",
@@ -266,6 +274,23 @@ def test_search_phone_numbers_returns_matches(client):
     client.app.dependency_overrides.clear()
 
 
+def test_search_phone_numbers_post_broadens_filters_when_exact_match_is_empty(client):
+    twilio = _FakeTwilio()
+    client.app.dependency_overrides.update({deps.get_twilio_client: lambda: twilio})
+
+    response = client.post(
+        "/api/v1/agent/phone-numbers/search",
+        json={"country_code": "CA", "number_type": "local", "area_code": 548, "contains": "9999", "limit": 5},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body[0]["phone_number"] == "+14385335861"
+    assert len(twilio.search_calls) >= 2
+
+    client.app.dependency_overrides.clear()
+
+
 def test_search_phone_numbers_legacy_get_still_returns_matches(client):
     client.app.dependency_overrides.update({deps.get_twilio_client: lambda: _FakeTwilio()})
 
@@ -357,6 +382,23 @@ def test_get_phone_assignment_returns_current_binding(client):
     client.app.dependency_overrides.update({deps.get_backend_client: lambda: backend})
 
     response = client.get("/api/v1/agent/phone-numbers/assignment", params={"agent_id": "agent-1"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["phone_number"] == "+14165550101"
+    assert body["phone_number_sid"] == "PN123"
+    assert body["forwarding_number"] == "+97317000099"
+
+    client.app.dependency_overrides.clear()
+
+
+def test_post_phone_assignment_returns_current_binding(client):
+    backend = _FakeBackend()
+    backend.bind_phone_number(agent_id="agent-1", phone_number="+14165550101", phone_number_sid="PN123")
+    backend.set_call_forwarding(agent_id="agent-1", forwarding_number="+97317000099")
+    client.app.dependency_overrides.update({deps.get_backend_client: lambda: backend})
+
+    response = client.post("/api/v1/agent/phone-numbers/assignment", json={"agent_id": "agent-1"})
 
     assert response.status_code == 200
     body = response.json()

@@ -87,6 +87,10 @@ class AgentPhoneNumberSearchRequest(BaseModel):
     limit: int = Field(default=10, ge=1, le=20)
 
 
+class AgentPhoneNumberAssignmentRequest(BaseModel):
+    agent_id: str = Field(..., min_length=1)
+
+
 class AgentPhoneNumberProvisionResponse(BaseModel):
     agent_id: str
     phone_number_sid: str

@@ -19,6 +19,7 @@ def _retryable(exc: Exception) -> bool:
 class ElevenLabsClient:
     _audio_cache: dict[str, tuple[float, bytes]] = {}
     _cache_ttl_seconds = 900
+    _synthesis_cache: dict[tuple[str, str], tuple[float, bytes]] = {}
 
     def __init__(self, client: AsyncClient, api_key: str, default_voice_id: str):
         self.client = client
@@ -41,13 +42,20 @@ class ElevenLabsClient:
     )
     async def synthesize_audio_bytes(self, text: str, voice_id: str | None = None) -> bytes:
         voice = self._resolve_voice(voice_id)
+        cache_key = (voice, text.strip())
+        self._prune_audio_cache()
+        cached = self._synthesis_cache.get(cache_key)
+        if cached is not None:
+            return cached[1]
+
         url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice}"
-        payload = {"text": text, "model_id": "eleven_multilingual_v2"}
+        payload = {"text": text, "model_id": "eleven_turbo_v2_5"}
         headers = {"xi-api-key": self.api_key, "Accept": "audio/mpeg"}
         try:
             response = await self.client.post(url, json=payload, headers=headers)
             response.raise_for_status()
             audio_bytes = response.content
+            self._synthesis_cache[cache_key] = (time.monotonic(), audio_bytes)
             logger.info("Generated TTS", voice_id=voice)
             return audio_bytes
         except HTTPError as exc:  # includes HTTPStatusError
@@ -133,3 +141,8 @@ class ElevenLabsClient:
         expired = [key for key, (created_at, _) in cls._audio_cache.items() if now - created_at > cls._cache_ttl_seconds]
         for key in expired:
             cls._audio_cache.pop(key, None)
+        expired_synth = [
+            key for key, (created_at, _) in cls._synthesis_cache.items() if now - created_at > cls._cache_ttl_seconds
+        ]
+        for key in expired_synth:
+            cls._synthesis_cache.pop(key, None)

@@ -81,9 +81,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--input-rate", type=int, default=16000)
     parser.add_argument("--output-rate", type=int, default=16000)
-    parser.add_argument("--silence-seconds", type=float, default=1.3)
+    parser.add_argument("--silence-seconds", type=float, default=0.8)
     parser.add_argument("--min-utterance-seconds", type=float, default=0.5)
-    parser.add_argument("--start-timeout-seconds", type=float, default=15.0)
+    parser.add_argument("--start-timeout-seconds", type=float, default=10.0)
     parser.add_argument("--energy-threshold", type=float, default=450.0)
     parser.add_argument(
         "--barge-in",
@@ -121,11 +121,11 @@ def _capture_until_silence(
 
     # Adaptive silence thresholds (in chunks)
     # Short speech (< 2s): use base silence_seconds
-    # Medium speech (2-5s): need 2.0s of silence to end
-    # Long speech (> 5s): need 2.5s of silence to end
+    # Medium speech (2-5s): need 1.2s of silence to end
+    # Long speech (> 5s): need 1.6s of silence to end
     base_silence_chunks = max(1, int(silence_seconds / chunk_seconds))
-    medium_silence_chunks = max(1, int(2.0 / chunk_seconds))
-    long_silence_chunks = max(1, int(2.5 / chunk_seconds))
+    medium_silence_chunks = max(1, int(1.2 / chunk_seconds))
+    long_silence_chunks = max(1, int(1.6 / chunk_seconds))
 
     short_speech_threshold = int(2.0 / chunk_seconds)  # 2 seconds of speech
     long_speech_threshold = int(5.0 / chunk_seconds)    # 5 seconds of speech
@@ -195,7 +195,7 @@ def _transcribe(openai_client: OpenAI, wav_bytes: bytes) -> str:
     bio = io.BytesIO(wav_bytes)
     bio.name = "input.wav"
     result = openai_client.audio.transcriptions.create(
-        model="whisper-1",
+        model="gpt-4o-mini-transcribe",
         file=bio,
         language="en",
         prompt=(

@@ -17,6 +17,7 @@ from src.schemas import (
     AgentCallForwardingResponse,
     AgentCallReportRequest,
     AgentCallReportResponse,
+    AgentPhoneNumberAssignmentRequest,
     AgentPhoneNumberAssignmentResponse,
     AgentPhoneNumberProvisionRequest,
     AgentPhoneNumberProvisionResponse,
@@ -56,15 +57,59 @@ async def _run_phone_number_search(
             detail="area_code is only supported for local number searches.",
         )
 
-    try:
-        matches = await run_in_threadpool(
-            twilio_client.search_available_numbers,
-            country_code=country_code,
-            number_type=number_type,
-            limit=limit,
-            area_code=area_code,
-            contains=contains,
+    normalized_country = country_code.upper()
+    search_variants: list[dict[str, str | int | None]] = [
+        {
+            "country_code": normalized_country,
+            "number_type": number_type,
+            "limit": limit,
+            "area_code": area_code,
+            "contains": contains,
+        }
+    ]
+    if contains:
+        search_variants.append(
+            {
+                "country_code": normalized_country,
+                "number_type": number_type,
+                "limit": limit,
+                "area_code": area_code,
+                "contains": None,
+            }
         )
+    if area_code is not None:
+        search_variants.append(
+            {
+                "country_code": normalized_country,
+                "number_type": number_type,
+                "limit": limit,
+                "area_code": None,
+                "contains": None,
+            }
+        )
+
+    try:
+        matches: list[dict[str, str | dict[str, Any] | None]] = []
+        for variant in search_variants:
+            matches = await run_in_threadpool(
+                twilio_client.search_available_numbers,
+                country_code=str(variant["country_code"]),
+                number_type=str(variant["number_type"]),
+                limit=int(variant["limit"] or limit),
+                area_code=variant["area_code"] if isinstance(variant["area_code"], int) else None,
+                contains=str(variant["contains"]) if variant["contains"] else None,
+            )
+            if matches:
+                if variant["area_code"] != area_code or variant["contains"] != contains:
+                    logger.info(
+                        "Phone number search used broader fallback",
+                        country_code=normalized_country,
+                        number_type=number_type,
+                        requested_area_code=area_code,
+                        requested_contains=contains,
+                        returned_count=len(matches),
+                    )
+                break
     except ValueError as exc:
         logger.warning("Phone number search rejected", reason=str(exc), country_code=country_code, number_type=number_type)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -249,8 +294,8 @@ async def configure_call_forwarding(
     )
 
 
-@router.get("/phone-numbers/assignment", response_model=AgentPhoneNumberAssignmentResponse)
-async def get_phone_number_assignment(
+async def _get_phone_number_assignment_response(
+    *,
     agent_id: str,
     backend_client: BackendClient = Depends(get_backend_client),
 ) -> AgentPhoneNumberAssignmentResponse:
@@ -258,6 +303,22 @@ async def get_phone_number_assignment(
     if not assignment:
         return AgentPhoneNumberAssignmentResponse(agent_id=agent_id)
     return AgentPhoneNumberAssignmentResponse(agent_id=agent_id, **assignment)
+
+
+@router.post("/phone-numbers/assignment", response_model=AgentPhoneNumberAssignmentResponse)
+async def get_phone_number_assignment_post(
+    payload: AgentPhoneNumberAssignmentRequest,
+    backend_client: BackendClient = Depends(get_backend_client),
+) -> AgentPhoneNumberAssignmentResponse:
+    return await _get_phone_number_assignment_response(agent_id=payload.agent_id, backend_client=backend_client)
+
+
+@router.get("/phone-numbers/assignment", response_model=AgentPhoneNumberAssignmentResponse)
+async def get_phone_number_assignment(
+    agent_id: str,
+    backend_client: BackendClient = Depends(get_backend_client),
+) -> AgentPhoneNumberAssignmentResponse:
+    return await _get_phone_number_assignment_response(agent_id=agent_id, backend_client=backend_client)
 
 
 @router.post("/phone-numbers/rebind", response_model=AgentPhoneNumberRebindResponse)
