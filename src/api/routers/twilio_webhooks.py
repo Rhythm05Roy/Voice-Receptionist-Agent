@@ -9,6 +9,7 @@ from loguru import logger
 from src.api.deps import (
     get_backend_client,
     get_conversation_engine,
+    get_elevenlabs_client,
     get_settings_dep,
     get_twilio_client,
     rate_limit_webhook,
@@ -16,6 +17,7 @@ from src.api.deps import (
 from src.config import Settings
 from src.core.conversation.engine import ConversationEngine
 from src.core.services.backend_client import BackendClient
+from src.core.services.elevenlabs import ElevenLabsClient
 from src.core.services.twilio_client import TwilioClient
 
 router = APIRouter(prefix="/twilio", tags=["twilio"])
@@ -39,6 +41,33 @@ def _action_url(request: Request, settings: Settings) -> str:
     return f"{request.url_for('twilio_incoming_call')}{query}"
 
 
+async def _build_play_url(
+    *,
+    text: str,
+    call_id: str,
+    settings: Settings,
+    engine: ConversationEngine,
+    elevenlabs_client: ElevenLabsClient,
+) -> str | None:
+    if not text or not settings.public_base_url:
+        return None
+
+    voice_id = None
+    session = await engine.sessions.get(call_id)
+    if session is not None:
+        preferred_language = session.preferred_language or session.agent_config.default_greeting_language or session.agent_config.language
+        voice_id = session.agent_config.language_voice_map.get((preferred_language or "en").lower())
+
+    try:
+        audio_bytes = await elevenlabs_client.synthesize_audio_bytes(text, voice_id=voice_id)
+    except Exception:  # noqa: BLE001
+        logger.bind(call_id=call_id).warning("ElevenLabs synthesis failed for Twilio playback")
+        return None
+
+    audio_id = ElevenLabsClient.cache_audio_bytes(audio_bytes)
+    return f"{settings.public_base_url.rstrip('/')}/api/v1/voice/cache/{audio_id}"
+
+
 @router.post("/webhook/incoming", name="twilio_incoming_call")
 async def incoming_call(
     request: Request,
@@ -46,6 +75,7 @@ async def incoming_call(
     settings: Settings = Depends(get_settings_dep),
     engine: ConversationEngine = Depends(get_conversation_engine),
     twilio_client: TwilioClient = Depends(get_twilio_client),
+    elevenlabs_client: ElevenLabsClient = Depends(get_elevenlabs_client),
     backend_client: BackendClient = Depends(get_backend_client),
     agent_id: str | None = Query(default=None),
     CallSid: str = Form(""),
@@ -88,18 +118,44 @@ async def incoming_call(
             )
 
             if not speech_text:
-                twiml = twilio_client.build_gather_twiml(text=greeting["text"], action_url=action_url)
+                play_url = await _build_play_url(
+                    text=greeting["text"],
+                    call_id=call_id,
+                    settings=settings,
+                    engine=engine,
+                    elevenlabs_client=elevenlabs_client,
+                )
+                twiml = twilio_client.build_gather_twiml(
+                    text=greeting["text"],
+                    action_url=action_url,
+                    play_url=play_url,
+                )
                 return Response(content=twiml, media_type=TWIML_CONTENT_TYPE)
 
         if not speech_text:
+            play_url = await _build_play_url(
+                text="I did not catch that. Please go ahead.",
+                call_id=call_id,
+                settings=settings,
+                engine=engine,
+                elevenlabs_client=elevenlabs_client,
+            )
             twiml = twilio_client.build_gather_twiml(
                 text="I did not catch that. Please go ahead.",
                 action_url=action_url,
+                play_url=play_url,
             )
             return Response(content=twiml, media_type=TWIML_CONTENT_TYPE)
 
         action = await engine.process_user_input(call_id=call_id, transcribed_text=speech_text, agent_id=agent_id)
-        twiml = twilio_client.build_action_twiml(action=action, action_url=action_url)
+        play_url = await _build_play_url(
+            text=str(action.get("text_to_speak") or ""),
+            call_id=call_id,
+            settings=settings,
+            engine=engine,
+            elevenlabs_client=elevenlabs_client,
+        )
+        twiml = twilio_client.build_action_twiml(action=action, action_url=action_url, play_url=play_url)
 
         if action.get("action") == "hangup":
             await engine.end_call(call_id)
@@ -107,9 +163,17 @@ async def incoming_call(
         return Response(content=twiml, media_type=TWIML_CONTENT_TYPE)
     except Exception:  # noqa: BLE001
         logger.bind(call_id=call_id).exception("Twilio incoming webhook failed")
+        play_url = await _build_play_url(
+            text="Sorry, something went wrong. Please try again.",
+            call_id=call_id,
+            settings=settings,
+            engine=engine,
+            elevenlabs_client=elevenlabs_client,
+        )
         fallback = twilio_client.build_gather_twiml(
             text="Sorry, something went wrong. Please try again.",
             action_url=action_url,
+            play_url=play_url,
         )
         return Response(content=fallback, media_type=TWIML_CONTENT_TYPE)
 

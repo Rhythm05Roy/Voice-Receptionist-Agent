@@ -1,4 +1,6 @@
 import base64
+import time
+import uuid
 from typing import AsyncIterator
 
 from httpx import AsyncClient, HTTPError, HTTPStatusError
@@ -15,6 +17,9 @@ def _retryable(exc: Exception) -> bool:
 
 
 class ElevenLabsClient:
+    _audio_cache: dict[str, tuple[float, bytes]] = {}
+    _cache_ttl_seconds = 900
+
     def __init__(self, client: AsyncClient, api_key: str, default_voice_id: str):
         self.client = client
         self.api_key = api_key
@@ -34,8 +39,7 @@ class ElevenLabsClient:
         stop=stop_after_attempt(3),
         before_sleep=before_sleep_log(logger, "WARNING"),
     )
-    async def synthesize_text(self, text: str, voice_id: str | None = None) -> str:
-        """Batch TTS — returns complete audio as data URL."""
+    async def synthesize_audio_bytes(self, text: str, voice_id: str | None = None) -> bytes:
         voice = self._resolve_voice(voice_id)
         url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice}"
         payload = {"text": text, "model_id": "eleven_multilingual_v2"}
@@ -44,12 +48,16 @@ class ElevenLabsClient:
             response = await self.client.post(url, json=payload, headers=headers)
             response.raise_for_status()
             audio_bytes = response.content
-            data_url = "data:audio/mpeg;base64," + base64.b64encode(audio_bytes).decode()
             logger.info("Generated TTS", voice_id=voice)
-            return data_url
+            return audio_bytes
         except HTTPError as exc:  # includes HTTPStatusError
             logger.exception("TTS generation failed")
             raise VoiceGenerationError(str(exc))
+
+    async def synthesize_text(self, text: str, voice_id: str | None = None) -> str:
+        """Batch TTS — returns complete audio as data URL."""
+        audio_bytes = await self.synthesize_audio_bytes(text, voice_id)
+        return "data:audio/mpeg;base64," + base64.b64encode(audio_bytes).decode()
 
     async def stream_speech(
         self,
@@ -103,3 +111,25 @@ class ElevenLabsClient:
         except HTTPError as exc:
             logger.exception("Turbo TTS failed, falling back to standard")
             return await self.synthesize_text(text, voice_id)
+
+    @classmethod
+    def cache_audio_bytes(cls, audio_bytes: bytes) -> str:
+        cls._prune_audio_cache()
+        audio_id = uuid.uuid4().hex
+        cls._audio_cache[audio_id] = (time.monotonic(), audio_bytes)
+        return audio_id
+
+    @classmethod
+    def get_cached_audio_bytes(cls, audio_id: str) -> bytes | None:
+        cls._prune_audio_cache()
+        payload = cls._audio_cache.get(audio_id)
+        if not payload:
+            return None
+        return payload[1]
+
+    @classmethod
+    def _prune_audio_cache(cls) -> None:
+        now = time.monotonic()
+        expired = [key for key, (created_at, _) in cls._audio_cache.items() if now - created_at > cls._cache_ttl_seconds]
+        for key in expired:
+            cls._audio_cache.pop(key, None)

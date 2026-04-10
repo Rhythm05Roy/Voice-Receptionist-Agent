@@ -8,6 +8,7 @@ class _FakeEngine:
         self.ended = []
         self.started_agent_ids = []
         self.processed_agent_ids = []
+        self.sessions = _FakeSessionStore()
 
     async def has_session(self, call_id: str) -> bool:
         return call_id in self._sessions
@@ -31,6 +32,16 @@ class _FakeEngine:
 
     async def end_call(self, call_id: str) -> None:
         self.ended.append(call_id)
+
+
+class _FakeSessionStore:
+    async def get(self, call_id: str):
+        return None
+
+
+class _FakeElevenLabs:
+    async def synthesize_audio_bytes(self, text: str, voice_id: str | None = None) -> bytes:
+        return b"fake-mp3"
 
 
 class _FakeVonage:
@@ -57,8 +68,8 @@ class _FakeBackend:
 
 
 class _FakeSettings:
-    def __init__(self, validate_signature: bool = False):
-        self.public_base_url = ""
+    def __init__(self, validate_signature: bool = False, public_base_url: str = ""):
+        self.public_base_url = public_base_url
         self.twilio_validate_signature = validate_signature
         self.twilio_auth_token = "test-token"
 
@@ -74,7 +85,7 @@ def _overrides(client, engine):
     )
 
 
-def _twilio_overrides(client, engine, validate_signature: bool = False):
+def _twilio_overrides(client, engine, validate_signature: bool = False, public_base_url: str = ""):
     client.app.dependency_overrides.update(
         {
             deps.get_conversation_engine: lambda: engine,
@@ -84,7 +95,11 @@ def _twilio_overrides(client, engine, validate_signature: bool = False):
                 phone_number="+10000000000",
             ),
             deps.get_backend_client: lambda: _FakeBackend(),
-            deps.get_settings_dep: lambda: _FakeSettings(validate_signature=validate_signature),
+            deps.get_settings_dep: lambda: _FakeSettings(
+                validate_signature=validate_signature,
+                public_base_url=public_base_url,
+            ),
+            deps.get_elevenlabs_client: lambda: _FakeElevenLabs(),
             deps.rate_limit_webhook: lambda: None,
         }
     )
@@ -233,5 +248,25 @@ def test_twilio_incoming_rejects_invalid_signature_when_enabled(client):
 
     assert response.status_code == 403
     assert "Invalid Twilio signature" in response.text
+
+    client.app.dependency_overrides.clear()
+
+
+def test_twilio_incoming_uses_elevenlabs_play_when_public_base_url_available(client):
+    engine = _FakeEngine()
+    _twilio_overrides(client, engine, public_base_url="https://voice.example.com")
+
+    response = client.post(
+        "/api/v1/twilio/webhook/incoming",
+        data={
+            "CallSid": "CA444",
+            "From": "+10000000001",
+            "To": "+10000000002",
+        },
+    )
+
+    assert response.status_code == 200
+    assert "<Play>https://voice.example.com/api/v1/voice/cache/" in response.text
+    assert "<Say voice=\"Polly.Joanna\">hello</Say>" not in response.text
 
     client.app.dependency_overrides.clear()

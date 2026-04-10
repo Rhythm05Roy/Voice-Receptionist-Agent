@@ -238,6 +238,7 @@ class TwilioClient:
         speech_timeout: str = "auto",
         voice: str = "Polly.Joanna",
         language: str = "en-US",
+        play_url: str | None = None,
     ) -> str:
         safe_text = self._safe_text(text)
         lines = ['<?xml version="1.0" encoding="UTF-8"?>', "<Response>"]
@@ -251,7 +252,9 @@ class TwilioClient:
             f'language="{language}" '
             'speechModel="phone_call">'
         )
-        if safe_text:
+        if play_url:
+            lines.append(f'    <Play>{self._safe_text(play_url)}</Play>')
+        elif safe_text:
             lines.append(f'    <Say voice="{voice}">{safe_text}</Say>')
         lines.append("  </Gather>")
         lines.append(f'  <Say voice="{voice}">I did not catch that. Please try again.</Say>')
@@ -259,9 +262,11 @@ class TwilioClient:
         lines.append("</Response>")
         return "\n".join(lines)
 
-    def build_hangup_twiml(self, text: str = "", voice: str = "Polly.Joanna") -> str:
+    def build_hangup_twiml(self, text: str = "", voice: str = "Polly.Joanna", play_url: str | None = None) -> str:
         lines = ['<?xml version="1.0" encoding="UTF-8"?>', "<Response>"]
-        if text:
+        if play_url:
+            lines.append(f'  <Play>{self._safe_text(play_url)}</Play>')
+        elif text:
             lines.append(f'  <Say voice="{voice}">{self._safe_text(text)}</Say>')
         lines.append("  <Hangup/>")
         lines.append("</Response>")
@@ -272,14 +277,20 @@ class TwilioClient:
         text: str,
         transfer_number: str,
         voice: str = "Polly.Joanna",
+        play_url: str | None = None,
     ) -> str:
         lines = [
             '<?xml version="1.0" encoding="UTF-8"?>',
             "<Response>",
-            f'  <Say voice="{voice}">{self._safe_text(text)}</Say>',
+        ]
+        if play_url:
+            lines.append(f'  <Play>{self._safe_text(play_url)}</Play>')
+        else:
+            lines.append(f'  <Say voice="{voice}">{self._safe_text(text)}</Say>')
+        lines.extend([
             f"  <Dial>{transfer_number}</Dial>",
             "</Response>",
-        ]
+        ])
         return "\n".join(lines)
 
     def build_action_twiml(
@@ -287,16 +298,17 @@ class TwilioClient:
         action: dict[str, str | None],
         action_url: str,
         voice: str = "Polly.Joanna",
+        play_url: str | None = None,
     ) -> str:
         action_type = action.get("action", "speak")
         text = action.get("text_to_speak", "")
         transfer_number = action.get("transfer_number")
 
         if action_type == "hangup":
-            return self.build_hangup_twiml(text or "", voice=voice)
+            return self.build_hangup_twiml(text or "", voice=voice, play_url=play_url)
         if action_type == "transfer" and transfer_number:
-            return self.build_transfer_twiml(text or "", transfer_number, voice=voice)
-        return self.build_gather_twiml(text or "", action_url, voice=voice)
+            return self.build_transfer_twiml(text or "", transfer_number, voice=voice, play_url=play_url)
+        return self.build_gather_twiml(text or "", action_url, voice=voice, play_url=play_url)
 
     def build_diagnostic_twiml(
         self,

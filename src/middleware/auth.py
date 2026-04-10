@@ -18,6 +18,7 @@ _BYPASS_PREFIXES = (
     "/openapi.json",
     "/api/v1/telephony/webhook",
     "/api/v1/twilio/webhook",
+    "/api/v1/voice/cache",
 )
 
 
