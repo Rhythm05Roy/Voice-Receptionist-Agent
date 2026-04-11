@@ -13,9 +13,13 @@ class _FakeEngine:
             "call_id": call_id,
             "agent_id": "agent-1",
             "business_name": "Test Biz",
+            "summary": "Customer wants to make a reservation.",
+            "action_required": True,
+            "action_type": "booking_followup",
+            "booking_status": "pending",
+            "final_disposition": "booking_request",
             "customer_details": {"phone_number": "+14165550101", "name": "Ridam"},
             "order_or_booked_service": {"interaction_type": "booking", "service_type": "Home Deep Cleaning"},
-            "configured_intake_questions": [],
             "call_analytics": {"duration_seconds": 32.5, "turn_count": 4, "outcome": "completed"},
             "transcript": [{"role": "user", "content": "Need cleaning"}],
         }
@@ -251,8 +255,14 @@ def test_call_report_returns_structured_payload(client):
     assert response.status_code == 200
     body = response.json()
     assert body["call_id"] == "call-123"
+    assert body["summary"] == "Customer wants to make a reservation."
+    assert body["action_required"] is True
+    assert body["action_type"] == "booking_followup"
+    assert body["booking_status"] == "pending"
+    assert body["final_disposition"] == "booking_request"
     assert body["customer_details"]["name"] == "Ridam"
     assert body["order_or_booked_service"]["interaction_type"] == "booking"
+    assert "configured_intake_questions" not in body
 
     client.app.dependency_overrides.clear()
 

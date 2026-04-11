@@ -789,13 +789,25 @@ class ConversationEngine:
         if record.report_payload:
             return record.report_payload
 
+        transcript = list(record.transcript)
+        interaction_type = self._infer_interaction_type({}, transcript)
+        booking_status = self._derive_booking_status({}, interaction_type)
+        final_disposition = self._derive_final_disposition({}, interaction_type, transferred=record.outcome == "transferred")
         return {
             "call_id": record.call_id,
             "agent_id": record.agent_id,
+            "business_name": None,
+            "summary": self._build_report_summary({}, transcript, interaction_type, business_name=None),
+            "action_required": self._derive_action_required({}, interaction_type, booking_status),
+            "action_type": self._derive_action_type({}, interaction_type, transferred=record.outcome == "transferred"),
+            "booking_status": booking_status,
+            "final_disposition": final_disposition,
             "customer_details": {
                 "phone_number": record.caller_number,
             },
-            "order_or_booked_service": {},
+            "order_or_booked_service": {
+                "interaction_type": interaction_type,
+            },
             "call_analytics": {
                 "call_id": record.call_id,
                 "agent_id": record.agent_id,
@@ -819,7 +831,7 @@ class ConversationEngine:
             customer_details.setdefault("language", session.preferred_language)
 
         order_or_booking = dict(session.state.get("order_or_booking") or {})
-        interaction_type = session.state.get("interaction_type") or order_or_booking.get("type") or "unknown"
+        interaction_type = self._infer_interaction_type(session.state, session.conversation_history)
         if session.state.get("queries"):
             order_or_booking.setdefault("queries", list(session.state.get("queries", [])))
         if session.state.get("intake_answers"):
@@ -830,36 +842,36 @@ class ConversationEngine:
             order_or_booking.setdefault("short_booking_id", session.state.get("last_short_id"))
         order_or_booking.setdefault("interaction_type", interaction_type)
 
-        intake_answers = dict(session.state.get("intake_answers") or {})
-        configured_questions = []
-        for question in session.agent_config.intake_questions:
-            configured_questions.append(
-                {
-                    "key": question.key,
-                    "question": question.question,
-                    "answer_type": question.answer_type,
-                    "required": question.required,
-                    "ask_when": question.ask_when,
-                    "specific_categories": list(question.specific_categories),
-                    "service_tags": list(question.service_tags),
-                    "is_active": question.is_active,
-                    "answer": intake_answers.get(question.key),
-                }
-            )
-
         started_at = record.started_at if record else None
         ended_at = record.ended_at if record else None
         duration_seconds = round(record.duration_seconds, 2) if record else round(session.call_duration_seconds, 2)
         caller_number = record.caller_number if record else customer_details.get("phone_number", "")
         called_number = record.called_number if record else (session.state.get("call_context") or {}).get("called_number", "")
+        transferred = bool(session.state.get("transferred"))
+        booking_status = self._derive_booking_status(order_or_booking, interaction_type)
+        transcript = [
+            {"role": item.get("role", ""), "content": item.get("content", "")}
+            for item in session.conversation_history
+            if item.get("content")
+        ]
+        final_disposition = self._derive_final_disposition(order_or_booking, interaction_type, transferred=transferred)
 
         return {
             "call_id": session.call_id,
             "agent_id": session.agent_id,
             "business_name": session.agent_config.business_name,
+            "summary": self._build_report_summary(
+                order_or_booking,
+                transcript,
+                interaction_type,
+                business_name=session.agent_config.business_name,
+            ),
+            "action_required": self._derive_action_required(order_or_booking, interaction_type, booking_status),
+            "action_type": self._derive_action_type(order_or_booking, interaction_type, transferred=transferred),
+            "booking_status": booking_status,
+            "final_disposition": final_disposition,
             "customer_details": customer_details,
             "order_or_booked_service": order_or_booking,
-            "configured_intake_questions": configured_questions,
             "call_analytics": {
                 "call_id": session.call_id,
                 "agent_id": session.agent_id,
@@ -870,14 +882,130 @@ class ConversationEngine:
                 "ended_at": ended_at,
                 "duration_seconds": duration_seconds,
                 "turn_count": session.turn_count,
-                "outcome": "transferred" if session.state.get("transferred") else "completed",
-                "was_transferred": bool(session.state.get("transferred")),
+                "outcome": "transferred" if transferred else "completed",
+                "was_transferred": transferred,
                 "transfer_number": session.agent_config.fallback_phone,
                 "is_test": session.is_test,
             },
-            "transcript": [
-                {"role": item.get("role", ""), "content": item.get("content", "")}
-                for item in session.conversation_history
-                if item.get("content")
-            ],
+            "transcript": transcript,
         }
+
+    def _infer_interaction_type(self, state: dict[str, Any], transcript: list[dict[str, Any]]) -> str:
+        explicit = state.get("interaction_type") or (state.get("order_or_booking") or {}).get("type")
+        active_intent = state.get("active_intent")
+        if explicit in {"booking", "tracking", "transfer"}:
+            return explicit
+        if active_intent in {"booking", "tracking", "transfer"}:
+            return active_intent
+
+        joined_user_text = " ".join(
+            item.get("content", "").lower()
+            for item in transcript
+            if item.get("role") == "user" and item.get("content")
+        )
+        if any(token in joined_user_text for token in {"book", "booking", "reservation", "reserve", "appointment"}):
+            return "booking"
+        if any(token in joined_user_text for token in {"track", "status", "booking id", "reference"}):
+            return "tracking"
+        if any(token in joined_user_text for token in {"human", "agent", "representative", "transfer"}):
+            return "transfer"
+        if explicit:
+            return explicit
+        return "query"
+
+    def _derive_booking_status(self, order_or_booking: dict[str, Any], interaction_type: str) -> str | None:
+        status = order_or_booking.get("status")
+        if status:
+            return str(status)
+        if interaction_type == "booking":
+            if order_or_booking.get("booking_ref") or order_or_booking.get("short_booking_id"):
+                return "confirmed"
+            return "pending"
+        if interaction_type == "tracking":
+            return "inquiry"
+        return None
+
+    def _derive_action_required(
+        self,
+        order_or_booking: dict[str, Any],
+        interaction_type: str,
+        booking_status: str | None,
+    ) -> bool:
+        if interaction_type == "booking":
+            return booking_status not in {"confirmed", "completed", "cancelled"}
+        if interaction_type in {"tracking", "transfer"}:
+            return True
+        return False
+
+    def _derive_action_type(
+        self,
+        order_or_booking: dict[str, Any],
+        interaction_type: str,
+        *,
+        transferred: bool,
+    ) -> str | None:
+        if transferred:
+            return "human_transfer"
+        if interaction_type == "booking":
+            status = self._derive_booking_status(order_or_booking, interaction_type)
+            return "booking_followup" if status != "confirmed" else "booking_completed"
+        if interaction_type == "tracking":
+            return "tracking_followup"
+        if interaction_type == "transfer":
+            return "human_transfer"
+        return None
+
+    def _derive_final_disposition(
+        self,
+        order_or_booking: dict[str, Any],
+        interaction_type: str,
+        *,
+        transferred: bool,
+    ) -> str:
+        if transferred:
+            return "transferred_to_human"
+        if interaction_type == "booking":
+            status = self._derive_booking_status(order_or_booking, interaction_type)
+            return "booking_confirmed" if status == "confirmed" else "booking_request"
+        if interaction_type == "tracking":
+            return "booking_tracking"
+        if interaction_type == "transfer":
+            return "transfer_request"
+        return "general_query"
+
+    def _build_report_summary(
+        self,
+        order_or_booking: dict[str, Any],
+        transcript: list[dict[str, Any]],
+        interaction_type: str,
+        *,
+        business_name: str | None,
+    ) -> str:
+        service_name = (
+            order_or_booking.get("service_type")
+            or order_or_booking.get("service_name")
+            or "a service"
+        )
+        if interaction_type == "booking":
+            if order_or_booking.get("booking_ref") or order_or_booking.get("short_booking_id"):
+                return f"Customer completed a booking for {service_name}."
+            return f"Customer wants to make a reservation for {service_name}."
+        if interaction_type == "tracking":
+            booking_ref = order_or_booking.get("booking_ref") or "an existing booking"
+            return f"Customer wants to check the status of {booking_ref}."
+        if interaction_type == "transfer":
+            return "Customer requested escalation to a human agent."
+
+        last_user_message = next(
+            (
+                item.get("content", "").strip()
+                for item in reversed(transcript)
+                if item.get("role") == "user" and item.get("content")
+            ),
+            "",
+        )
+        if last_user_message:
+            return f"Customer asked: {last_user_message}"
+        if business_name:
+            return f"Customer contacted {business_name}."
+        return "Customer contacted the business."

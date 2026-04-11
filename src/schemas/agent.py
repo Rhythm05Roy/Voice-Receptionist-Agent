@@ -179,8 +179,12 @@ class AgentCallReportResponse(BaseModel):
     call_id: str
     agent_id: str
     business_name: str | None = None
+    summary: str = ""
+    action_required: bool = False
+    action_type: str | None = None
+    booking_status: str | None = None
+    final_disposition: str = "completed"
     customer_details: dict[str, Any] = Field(default_factory=dict)
     order_or_booked_service: dict[str, Any] = Field(default_factory=dict)
-    configured_intake_questions: list[dict[str, Any]] = Field(default_factory=list)
     call_analytics: dict[str, Any] = Field(default_factory=dict)
     transcript: list[dict[str, str]] = Field(default_factory=list)
