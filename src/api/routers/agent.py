@@ -585,9 +585,16 @@ async def test_voice_turn(
 
     audio_url: str | None = None
     text_to_speak = result.get("text_to_speak") or ""
+    voice_id: str | None = None
+    session_getter = getattr(engine, "sessions", None)
+    if session_getter is not None and hasattr(session_getter, "get"):
+        session = await engine.sessions.get(payload.session_id)
+        if session is not None:
+            preferred_language = (session.preferred_language or session.agent_config.default_greeting_language or "en").lower()
+            voice_id = session.agent_config.language_voice_map.get(preferred_language)
     if text_to_speak:
         try:
-            audio_url = await elevenlabs_client.synthesize_text(text_to_speak)
+            audio_url = await elevenlabs_client.synthesize_text(text_to_speak, voice_id=voice_id)
         except Exception:  # noqa: BLE001
             logger.warning("Direct test voice synthesis failed", session_id=payload.session_id)
 

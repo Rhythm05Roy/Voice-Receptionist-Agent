@@ -878,6 +878,104 @@ class BackendClient:
 
         return voice_map
 
+    async def _fetch_catalog_agent_profile(
+        self,
+        agent_id: str | None,
+        business_payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        url = self._agent_route_url("/api/agent/agents/")
+        payload = await self._get(url)
+        items = self._collection_items(payload, ("agents", "results", "data", "items"))
+
+        selected: dict[str, Any] | None = None
+        targets = {
+            str(value)
+            for value in (
+                agent_id,
+                business_payload.get("id"),
+                business_payload.get("agent_id"),
+            )
+            if value not in (None, "")
+        }
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_id = item.get("id")
+            if item_id is not None and str(item_id) in targets:
+                selected = item
+                break
+        if selected is None and isinstance(payload, dict) and payload.get("id") is not None:
+            selected = payload
+        if selected is None:
+            return {}
+
+        languages = selected.get("language") or []
+        supported_languages: list[str] = []
+        default_language: str | None = None
+        selected_language_id: int | None = None
+        for raw_item in languages:
+            if not isinstance(raw_item, dict):
+                continue
+            code = self._normalize_language_code(raw_item.get("language") or raw_item.get("code"))
+            if not code:
+                continue
+            if raw_item.get("is_greeting", True):
+                supported_languages.append(code)
+            if raw_item.get("is_default"):
+                default_language = code
+                selected_language_id = raw_item.get("id")
+
+        unique_supported = [code for code in dict.fromkeys(supported_languages) if code]
+        if not default_language and unique_supported:
+            default_language = unique_supported[0]
+        if selected_language_id is None and languages:
+            first_language = next((item for item in languages if isinstance(item, dict)), None)
+            if isinstance(first_language, dict):
+                selected_language_id = first_language.get("id")
+
+        raw_voices = selected.get("voice") or []
+        language_voice_map: dict[str, str] = {}
+        selected_voice_id: int | None = None
+        selected_voice_external_id: str | None = None
+        active_voice_items = [item for item in raw_voices if isinstance(item, dict) and item.get("is_active")]
+        voice_candidates = active_voice_items or [item for item in raw_voices if isinstance(item, dict)]
+
+        for raw_item in voice_candidates:
+            nested_voice = raw_item.get("voice") if isinstance(raw_item.get("voice"), dict) else raw_item
+            if not isinstance(nested_voice, dict):
+                continue
+            code = self._normalize_language_code(nested_voice.get("language")) or default_language or "en"
+            external_voice_id = str(nested_voice.get("elevenlabs_voice_id") or nested_voice.get("voice_id") or "").strip()
+            if external_voice_id and code and code not in language_voice_map:
+                language_voice_map[code] = external_voice_id
+            if selected_voice_id is None and nested_voice.get("id") is not None:
+                selected_voice_id = nested_voice.get("id")
+            if selected_voice_external_id is None and external_voice_id:
+                selected_voice_external_id = external_voice_id
+
+        if default_language and default_language not in language_voice_map and selected_voice_external_id:
+            language_voice_map[default_language] = selected_voice_external_id
+        if not unique_supported and default_language:
+            unique_supported = [default_language]
+
+        result: dict[str, Any] = {
+            "multilingual_enabled": bool(selected.get("multilingual_enabled", len(unique_supported) > 1)),
+        }
+        if selected.get("greeting_message"):
+            result["greeting"] = selected.get("greeting_message")
+        if unique_supported:
+            result["supported_languages"] = unique_supported
+        if default_language:
+            result["default_greeting_language"] = default_language
+            result["language"] = default_language
+        if language_voice_map:
+            result["language_voice_map"] = language_voice_map
+        if selected_voice_id is not None:
+            result["selected_voice_id"] = selected_voice_id
+        if selected_language_id is not None:
+            result["selected_language_id"] = selected_language_id
+        return result
+
     async def _enrich_business_catalog_config(
         self,
         normalized: dict[str, Any],
@@ -908,6 +1006,14 @@ class BackendClient:
                 enriched["language_voice_map"] = voice_map
         except Exception:  # noqa: BLE001
             logger.warning("Failed to fetch external voice settings; using default ElevenLabs voice", agent_id=agent_id)
+
+        try:
+            agent_profile = await self._fetch_catalog_agent_profile(agent_id, business_payload)
+            for key, value in agent_profile.items():
+                if value not in (None, [], {}):
+                    enriched[key] = value
+        except Exception:  # noqa: BLE001
+            logger.warning("Failed to fetch external agent profile; using existing business defaults", agent_id=agent_id)
 
         return enriched
 
@@ -960,6 +1066,8 @@ class BackendClient:
             or payload.get("language")
             or "en",
             "language_voice_map": payload.get("language_voice_map") or language_settings.get("language_voice_map") or {},
+            "selected_voice_id": payload.get("selected_voice_id"),
+            "selected_language_id": payload.get("selected_language_id"),
             "fallback_phone": payload.get("fallback_phone") or transfer_settings.get("transfer_number"),
             "max_call_duration_minutes": payload.get("max_call_duration_minutes") or transfer_settings.get("max_duration_minutes") or 5,
             "coverage_country": payload.get("coverage_country") or "Bahrain",
@@ -986,6 +1094,8 @@ class BackendClient:
             "multilingual_enabled": agent.multilingual_enabled,
             "supported_languages": agent.supported_languages,
             "default_greeting_language": agent.default_greeting_language,
+            "selected_voice_id": agent.selected_voice_id,
+            "selected_language_id": agent.selected_language_id,
             "fallback_phone": agent.fallback_phone,
             "max_call_duration_minutes": agent.max_call_duration_minutes,
             "coverage_country": agent.coverage_country,

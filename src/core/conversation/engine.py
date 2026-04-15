@@ -805,10 +805,13 @@ class ConversationEngine:
         interaction_type = self._infer_interaction_type({}, transcript)
         booking_status = self._derive_booking_status({}, interaction_type)
         final_disposition = self._derive_final_disposition({}, interaction_type, transferred=record.outcome == "transferred")
+        outcome = self._derive_outcome(record.outcome == "transferred")
         return {
             "call_id": record.call_id,
             "agent_id": record.agent_id,
             "business_name": None,
+            "voice_id": None,
+            "language_id": None,
             "summary": self._build_report_summary({}, transcript, interaction_type, business_name=None),
             "action_required": self._derive_action_required({}, interaction_type, booking_status),
             "action_type": self._derive_action_type({}, interaction_type, transferred=record.outcome == "transferred"),
@@ -825,7 +828,7 @@ class ConversationEngine:
                 "agent_id": record.agent_id,
                 "duration_seconds": round(record.duration_seconds, 2),
                 "turn_count": record.turn_count,
-                "outcome": record.outcome,
+                "outcome": outcome,
                 "started_at": record.started_at,
                 "ended_at": record.ended_at,
                 "is_test": record.is_test,
@@ -867,11 +870,14 @@ class ConversationEngine:
             if item.get("content")
         ]
         final_disposition = self._derive_final_disposition(order_or_booking, interaction_type, transferred=transferred)
+        outcome = self._derive_outcome(transferred)
 
         return {
             "call_id": session.call_id,
             "agent_id": session.agent_id,
             "business_name": session.agent_config.business_name,
+            "voice_id": session.agent_config.selected_voice_id,
+            "language_id": session.agent_config.selected_language_id,
             "summary": self._build_report_summary(
                 order_or_booking,
                 transcript,
@@ -894,7 +900,7 @@ class ConversationEngine:
                 "ended_at": ended_at,
                 "duration_seconds": duration_seconds,
                 "turn_count": session.turn_count,
-                "outcome": "transferred" if transferred else "completed",
+                "outcome": outcome,
                 "was_transferred": transferred,
                 "transfer_number": session.agent_config.fallback_phone,
                 "is_test": session.is_test,
@@ -928,14 +934,20 @@ class ConversationEngine:
     def _derive_booking_status(self, order_or_booking: dict[str, Any], interaction_type: str) -> str | None:
         status = order_or_booking.get("status")
         if status:
-            return str(status)
+            normalized = str(status).strip().lower()
+            if normalized in {"confirmed", "scheduled", "created", "booked", "completed"}:
+                return "confirmed"
+            if normalized in {"pending", "requested", "awaiting_confirmation"}:
+                return "pending"
+            if normalized in {"inquiry", "tracking", "not_found", "unknown"}:
+                return "inquiry"
         if interaction_type == "booking":
             if order_or_booking.get("booking_ref") or order_or_booking.get("short_booking_id"):
                 return "confirmed"
             return "pending"
         if interaction_type == "tracking":
             return "inquiry"
-        return None
+        return "not_applicable"
 
     def _derive_action_required(
         self,
@@ -955,7 +967,7 @@ class ConversationEngine:
         interaction_type: str,
         *,
         transferred: bool,
-    ) -> str | None:
+    ) -> str:
         if transferred:
             return "human_transfer"
         if interaction_type == "booking":
@@ -965,7 +977,7 @@ class ConversationEngine:
             return "tracking_followup"
         if interaction_type == "transfer":
             return "human_transfer"
-        return None
+        return "none"
 
     def _derive_final_disposition(
         self,
@@ -984,6 +996,9 @@ class ConversationEngine:
         if interaction_type == "transfer":
             return "transfer_request"
         return "general_query"
+
+    def _derive_outcome(self, transferred: bool) -> str:
+        return "transferred" if transferred else "completed"
 
     def _build_report_summary(
         self,

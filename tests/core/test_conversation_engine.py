@@ -31,6 +31,8 @@ class _Backend:
             language="en",
             default_greeting_language="en",
             supported_languages=["en", "ar"],
+            selected_voice_id=14,
+            selected_language_id=13,
             coverage_country="Bahrain",
             coverage_areas=["Manama", "Riffa", "Muharraq"],
             fallback_phone="+97317000000",
@@ -478,6 +480,8 @@ def test_call_report_contains_booking_details():
     report = asyncio.run(engine.build_call_report("call-008b"))
 
     assert report is not None
+    assert report["voice_id"] == 14
+    assert report["language_id"] == 13
     assert report["customer_details"]["phone_number"] == "+14165550101"
     assert report["order_or_booked_service"]["interaction_type"] == "booking"
     assert report["order_or_booked_service"]["service_type"] == "Home Deep Cleaning"

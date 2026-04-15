@@ -1,5 +1,9 @@
 from typing import Any, Literal
 
+ActionType = Literal["booking_followup", "booking_completed", "tracking_followup", "human_transfer", "none"]
+BookingStatus = Literal["pending", "confirmed", "inquiry", "not_applicable"]
+FinalDisposition = Literal["booking_request", "booking_confirmed", "booking_tracking", "transferred_to_human", "general_query"]
+
 from pydantic import BaseModel, Field, model_validator
 
 
@@ -186,11 +190,13 @@ class AgentCallReportResponse(BaseModel):
     call_id: str
     agent_id: str
     business_name: str | None = None
+    voice_id: int | None = None
+    language_id: int | None = None
     summary: str = ""
     action_required: bool = False
-    action_type: str | None = None
-    booking_status: str | None = None
-    final_disposition: str = "completed"
+    action_type: ActionType = "none"
+    booking_status: BookingStatus = "not_applicable"
+    final_disposition: FinalDisposition = "general_query"
     customer_details: dict[str, Any] = Field(default_factory=dict)
     order_or_booked_service: dict[str, Any] = Field(default_factory=dict)
     call_analytics: dict[str, Any] = Field(default_factory=dict)

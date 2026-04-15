@@ -134,6 +134,8 @@ class AgentConfig(BaseModel):
     supported_languages: list[str] = Field(default_factory=lambda: ["en", "ar"])
     default_greeting_language: str = Field(default="en")
     language_voice_map: dict[str, str] = Field(default_factory=dict)
+    selected_voice_id: int | None = Field(default=None)
+    selected_language_id: int | None = Field(default=None)
     fallback_phone: str | None = Field(default=None)
     max_call_duration_minutes: int = Field(default=15, ge=1, le=60)
     coverage_country: str = Field(default="")

@@ -80,6 +80,32 @@ VOICE_PAYLOAD = [
     {"business": 1, "language_code": "ar", "voice_id": "voice-ar-456", "is_selected": True},
 ]
 
+AGENTS_PAYLOAD = [
+    {
+        "id": 1,
+        "voice": [
+            {
+                "id": 91,
+                "agent": 1,
+                "voice": {
+                    "id": 14,
+                    "provider": "elevenlabs",
+                    "elevenlabs_voice_id": "voice-es-selected",
+                    "name": "Belle",
+                    "language": "es",
+                },
+                "is_active": True,
+            }
+        ],
+        "language": [
+            {"id": 13, "business": 1, "agent": 1, "language": "en", "is_greeting": True, "is_default": False},
+            {"id": 14, "business": 1, "agent": 1, "language": "es", "is_greeting": True, "is_default": True},
+        ],
+        "greeting_message": "Hola, gracias por llamar a Urban Glow Salon. En que puedo ayudarte?",
+        "multilingual_enabled": False,
+    }
+]
+
 
 def _make_client() -> BackendClient:
     def handler(request: httpx.Request) -> httpx.Response:
@@ -92,6 +118,8 @@ def _make_client() -> BackendClient:
             return httpx.Response(200, json=LANGUAGE_PAYLOAD)
         if url == "http://example.test/api/agent/agent-voices/":
             return httpx.Response(200, json=VOICE_PAYLOAD)
+        if url == "http://example.test/api/agent/agents/":
+            return httpx.Response(200, json=AGENTS_PAYLOAD)
         raise AssertionError(f"Unexpected URL: {url}")
 
     transport = httpx.MockTransport(handler)
@@ -115,6 +143,8 @@ def _make_root_client() -> BackendClient:
             return httpx.Response(200, json=LANGUAGE_PAYLOAD)
         if url == "http://example.test/api/agent/agent-voices/":
             return httpx.Response(200, json=VOICE_PAYLOAD)
+        if url == "http://example.test/api/agent/agents/":
+            return httpx.Response(200, json=AGENTS_PAYLOAD)
         raise AssertionError(f"Unexpected URL: {url}")
 
     transport = httpx.MockTransport(handler)
@@ -137,9 +167,13 @@ def test_fetch_agent_config_from_business_catalog():
     assert config.service_catalog[0].base_price == "500.00"
     assert config.cancellation_policy.startswith("Please provide 24-hour notice")
     assert "Do I need an appointment?" in config.faqs
-    assert config.supported_languages == ["en", "ar"]
-    assert config.default_greeting_language == "en"
-    assert config.language_voice_map == {"en": "voice-en-123", "ar": "voice-ar-456"}
+    assert config.supported_languages == ["en", "es"]
+    assert config.default_greeting_language == "es"
+    assert config.language == "es"
+    assert config.greeting.startswith("Hola, gracias por llamar")
+    assert config.language_voice_map["es"] == "voice-es-selected"
+    assert config.selected_voice_id == 14
+    assert config.selected_language_id == 14
     assert config.intake_questions[0].question.startswith("Are you currently pregnant")
 
     asyncio.run(backend.client.aclose())
@@ -151,8 +185,9 @@ def test_fetch_agent_config_from_api_root_base_url():
 
     assert config.agent_id == "1"
     assert config.business_name == "Urban Glow Salon"
-    assert config.supported_languages == ["en", "ar"]
-    assert config.language_voice_map == {"en": "voice-en-123", "ar": "voice-ar-456"}
+    assert config.supported_languages == ["en", "es"]
+    assert config.language_voice_map["es"] == "voice-es-selected"
+    assert config.selected_voice_id == 14
 
     asyncio.run(backend.client.aclose())
 
@@ -165,7 +200,10 @@ def test_fetch_agent_ui_context_from_business_catalog():
     assert payload["services"][0]["name"] == "Special haircut"
     assert "Thu:" in payload["business_hours"]
     assert payload["payment_policy"].startswith("We accept all major credit cards")
-    assert payload["supported_languages"] == ["en", "ar"]
+    assert payload["supported_languages"] == ["en", "es"]
+    assert payload["default_greeting_language"] == "es"
+    assert payload["selected_voice_id"] == 14
+    assert payload["selected_language_id"] == 14
     assert payload["intake_questions"][0]["answer_type"] == "yes_no"
 
     asyncio.run(backend.client.aclose())
