@@ -2,8 +2,25 @@
 
 
 class _FakeEngine:
-    async def start_session(self, call_id: str, agent_id: str | None = None, caller_number: str | None = None, called_number: str | None = None) -> dict:
+    async def has_session(self, call_id: str) -> bool:
+        return False
+
+    async def start_session(
+        self,
+        call_id: str,
+        agent_id: str | None = None,
+        caller_number: str | None = None,
+        called_number: str | None = None,
+        is_test: bool = False,
+    ) -> dict:
         return {"text": "hello", "audio_url": "data:audio/mpeg;base64,AAA"}
+
+    async def process_user_input(self, call_id: str, transcribed_text: str, agent_id: str | None = None) -> dict:
+        return {
+            "action": "speak",
+            "text_to_speak": "hello",
+            "transfer_number": None,
+        }
 
     async def end_call(self, call_id: str) -> None:
         return None
@@ -23,6 +40,11 @@ class _FakeEngine:
             "call_analytics": {"duration_seconds": 32.5, "turn_count": 4, "outcome": "completed"},
             "transcript": [{"role": "user", "content": "Need cleaning"}],
         }
+
+
+class _FakeTTS:
+    async def synthesize_text(self, text: str, voice_id: str | None = None) -> str:
+        return f"data:audio/mpeg;base64,{text[:8] or 'AAA'}"
 
 
 class _FakeBackend:
@@ -67,6 +89,13 @@ class _FakeBackend:
             "service_name": "Home Deep Cleaning",
             "location": "Manama",
             "preferred_time": "6:00 PM",
+        }
+
+    async def post_call_report(self, payload: dict) -> dict:
+        return {
+            "detail": "Call event processed successfully.",
+            "external_call_id": payload.get("call_id"),
+            "status": "completed",
         }
 
     def bind_phone_number(self, *, agent_id: str, phone_number: str, phone_number_sid: str = "", friendly_name: str = ""):
@@ -190,6 +219,26 @@ def test_preview_returns_audio_url(client):
     client.app.dependency_overrides.clear()
 
 
+def test_test_voice_start_returns_audio(client):
+    backend = _FakeBackend()
+    deps_override = {
+        deps.get_conversation_engine: lambda: _FakeEngine(),
+        deps.get_backend_client: lambda: backend,
+    }
+    client.app.dependency_overrides.update(deps_override)
+
+    response = client.post("/api/v1/agent/test-voice/start", json={"agent_id": "agent-1"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["session_id"].startswith("voice-test-")
+    assert body["text"] == "hello"
+    assert body["audio_url"].startswith("data:audio/mpeg")
+    assert body["is_active"] is True
+
+    client.app.dependency_overrides.clear()
+
+
 def test_context_returns_ui_payload(client):
     backend = _FakeBackend()
     deps_override = {
@@ -263,6 +312,49 @@ def test_call_report_returns_structured_payload(client):
     assert body["customer_details"]["name"] == "Ridam"
     assert body["order_or_booked_service"]["interaction_type"] == "booking"
     assert "configured_intake_questions" not in body
+
+    client.app.dependency_overrides.clear()
+
+
+def test_test_voice_turn_returns_tts_audio(client):
+    deps_override = {
+        deps.get_conversation_engine: lambda: _FakeEngine(),
+        deps.get_elevenlabs_client: lambda: _FakeTTS(),
+    }
+    client.app.dependency_overrides.update(deps_override)
+
+    response = client.post(
+        "/api/v1/agent/test-voice/turn",
+        json={"session_id": "voice-test-1", "text": "hello there", "agent_id": "agent-1"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["session_id"] == "voice-test-1"
+    assert body["text"] == "hello"
+    assert body["audio_url"].startswith("data:audio/mpeg")
+    assert body["action"] == "speak"
+    assert body["is_active"] is True
+
+    client.app.dependency_overrides.clear()
+
+
+def test_call_report_push_sends_payload_to_backend(client):
+    backend = _FakeBackend()
+    deps_override = {
+        deps.get_conversation_engine: lambda: _FakeEngine(),
+        deps.get_backend_client: lambda: backend,
+    }
+    client.app.dependency_overrides.update(deps_override)
+
+    response = client.post("/api/v1/agent/call-report/push", json={"call_id": "call-123"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "completed"
+    assert body["detail"] == "Call event processed successfully."
+    assert body["external_call_id"] == "call-123"
+    assert body["provider_response"]["external_call_id"] == "call-123"
 
     client.app.dependency_overrides.clear()
 

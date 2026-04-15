@@ -5,10 +5,11 @@ from fastapi.concurrency import run_in_threadpool
 from loguru import logger
 from pydantic import BaseModel
 
-from src.api.deps import get_backend_client, get_conversation_engine, get_settings_dep, get_twilio_client
+from src.api.deps import get_backend_client, get_conversation_engine, get_elevenlabs_client, get_settings_dep, get_twilio_client
 from src.config import Settings
 from src.core.conversation.engine import ConversationEngine
 from src.core.services.backend_client import BackendClient
+from src.core.services.elevenlabs import ElevenLabsClient
 from src.core.services.twilio_client import TwilioClient
 from src.schemas import (
     AgentBusinessQueryRequest,
@@ -16,6 +17,7 @@ from src.schemas import (
     AgentCallForwardingRequest,
     AgentCallForwardingResponse,
     AgentCallReportRequest,
+    AgentCallReportPushResponse,
     AgentCallReportResponse,
     AgentPhoneNumberAssignmentRequest,
     AgentPhoneNumberAssignmentResponse,
@@ -30,6 +32,9 @@ from src.schemas import (
     AgentPreviewRequest,
     AgentTrackBookingRequest,
     AgentTrackBookingResponse,
+    AgentTestVoiceResponse,
+    AgentTestVoiceStartRequest,
+    AgentTestVoiceTurnRequest,
     AgentUIContextResponse,
     TTSResponse,
 )
@@ -206,6 +211,33 @@ async def get_call_report(
     if not report:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call report not found.")
     return AgentCallReportResponse(**report)
+
+
+@router.post("/call-report/push", response_model=AgentCallReportPushResponse)
+async def push_call_report(
+    payload: AgentCallReportRequest,
+    engine: ConversationEngine = Depends(get_conversation_engine),
+    backend_client: BackendClient = Depends(get_backend_client),
+) -> AgentCallReportPushResponse:
+    report = await engine.build_call_report(payload.call_id)
+    if not report:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Call report not found.")
+
+    try:
+        provider_response = await backend_client.post_call_report(report)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Failed to push call report", call_id=payload.call_id)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to push call report to backend.",
+        ) from exc
+
+    return AgentCallReportPushResponse(
+        status=str(provider_response.get("status", "unknown")),
+        detail=str(provider_response.get("detail", "Call report delivered.")),
+        external_call_id=provider_response.get("external_call_id"),
+        provider_response=provider_response,
+    )
 
 
 @router.post("/phone-numbers/provision", response_model=AgentPhoneNumberProvisionResponse)
@@ -478,6 +510,28 @@ async def test_start(
     )
 
 
+@router.post("/test-voice/start", response_model=AgentTestVoiceResponse)
+async def test_voice_start(
+    payload: AgentTestVoiceStartRequest,
+    engine: ConversationEngine = Depends(get_conversation_engine),
+) -> AgentTestVoiceResponse:
+    """Start a direct non-telephony voice test session."""
+    session_id = f"voice-test-{uuid.uuid4()}"
+    result = await engine.start_session(
+        call_id=session_id,
+        agent_id=payload.agent_id,
+        is_test=True,
+    )
+    return AgentTestVoiceResponse(
+        session_id=session_id,
+        text=result["text"],
+        audio_url=result.get("audio_url"),
+        action="speak",
+        is_active=True,
+        transfer_number=None,
+    )
+
+
 @router.post("/test-turn", response_model=TestResponse)
 async def test_turn(
     payload: TestTurnRequest,
@@ -508,12 +562,64 @@ async def test_turn(
     )
 
 
+@router.post("/test-voice/turn", response_model=AgentTestVoiceResponse)
+async def test_voice_turn(
+    payload: AgentTestVoiceTurnRequest,
+    engine: ConversationEngine = Depends(get_conversation_engine),
+    elevenlabs_client: ElevenLabsClient = Depends(get_elevenlabs_client),
+) -> AgentTestVoiceResponse:
+    """Process a direct text turn and return synthesized audio without Twilio."""
+    if not await engine.has_session(payload.session_id):
+        await engine.start_session(
+            call_id=payload.session_id,
+            agent_id=payload.agent_id,
+            is_test=True,
+        )
+
+    result = await engine.process_user_input(
+        call_id=payload.session_id,
+        transcribed_text=payload.text,
+        agent_id=payload.agent_id,
+    )
+    is_active = result.get("action") != "hangup"
+
+    audio_url: str | None = None
+    text_to_speak = result.get("text_to_speak") or ""
+    if text_to_speak:
+        try:
+            audio_url = await elevenlabs_client.synthesize_text(text_to_speak)
+        except Exception:  # noqa: BLE001
+            logger.warning("Direct test voice synthesis failed", session_id=payload.session_id)
+
+    return AgentTestVoiceResponse(
+        session_id=payload.session_id,
+        text=text_to_speak,
+        audio_url=audio_url,
+        action=result.get("action", "speak"),
+        is_active=is_active,
+        transfer_number=result.get("transfer_number"),
+    )
+
+
 @router.post("/test-end")
 async def test_end(
     payload: TestTurnRequest,
     engine: ConversationEngine = Depends(get_conversation_engine),
 ) -> dict:
     """End a test conversation and return summary."""
+    await engine.end_call(payload.session_id)
+    return {
+        "status": "ended",
+        "session_id": payload.session_id,
+    }
+
+
+@router.post("/test-voice/end")
+async def test_voice_end(
+    payload: AgentTestVoiceTurnRequest,
+    engine: ConversationEngine = Depends(get_conversation_engine),
+) -> dict:
+    """End a direct non-telephony voice test session."""
     await engine.end_call(payload.session_id)
     return {
         "status": "ended",

@@ -415,6 +415,38 @@ class BackendClient:
             logger.exception("Backend GET failed", url=url)
             raise
 
+    @retry(
+        reraise=True,
+        retry=retry_if_exception(_retryable),
+        wait=wait_exponential(multiplier=1, min=1, max=8),
+        stop=stop_after_attempt(3),
+        before_sleep=before_sleep_log(logger, "WARNING"),
+    )
+    async def _post(self, url: str, payload: dict[str, Any]) -> Any:
+        self._ensure_circuit()
+        try:
+            response = await self.client.post(url, headers=self._headers, json=payload, follow_redirects=True)
+            response.raise_for_status()
+            self._record_success()
+            return response.json()
+        except HTTPError:
+            self._record_failure()
+            logger.exception("Backend POST failed", url=url)
+            raise
+
+    def _call_info_url(self) -> str:
+        return self._agent_route_url("/api/calls/call-info/")
+
+    async def post_call_report(self, payload: dict[str, Any]) -> dict[str, Any]:
+        url = self._call_info_url()
+        try:
+            response = await self._post(url, payload)
+        except HTTPError as exc:
+            raise BackendCommunicationError(f"Failed to post call report: {exc}") from exc
+        if not isinstance(response, dict):
+            raise BackendCommunicationError("Call report endpoint returned an unexpected response.")
+        return response
+
     @staticmethod
     def _slug(value: str) -> str:
         cleaned = re.sub(r"[^a-z0-9]+", "_", value.strip().lower())

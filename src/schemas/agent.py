@@ -175,6 +175,13 @@ class AgentCallReportRequest(BaseModel):
     call_id: str = Field(..., min_length=1)
 
 
+class AgentCallReportPushResponse(BaseModel):
+    status: str
+    detail: str
+    external_call_id: str | None = None
+    provider_response: dict[str, Any] = Field(default_factory=dict)
+
+
 class AgentCallReportResponse(BaseModel):
     call_id: str
     agent_id: str
@@ -188,3 +195,22 @@ class AgentCallReportResponse(BaseModel):
     order_or_booked_service: dict[str, Any] = Field(default_factory=dict)
     call_analytics: dict[str, Any] = Field(default_factory=dict)
     transcript: list[dict[str, str]] = Field(default_factory=list)
+
+
+class AgentTestVoiceStartRequest(BaseModel):
+    agent_id: str | None = None
+
+
+class AgentTestVoiceTurnRequest(BaseModel):
+    session_id: str
+    text: str = Field(..., min_length=1)
+    agent_id: str | None = None
+
+
+class AgentTestVoiceResponse(BaseModel):
+    session_id: str
+    text: str
+    audio_url: str | None = None
+    action: str = "speak"
+    is_active: bool = True
+    transfer_number: str | None = None

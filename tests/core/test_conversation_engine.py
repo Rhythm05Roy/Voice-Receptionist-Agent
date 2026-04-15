@@ -21,6 +21,7 @@ class _Backend:
         }
         self._booking_counter = 10001
         self.last_booking: dict | None = None
+        self.last_posted_report: dict | None = None
 
     async def fetch_agent_config(self, agent_id=None):
         return AgentConfig(
@@ -115,6 +116,14 @@ class _Backend:
             "status": "not_found",
             "booking_ref": booking_id,
             "message": f"No booking found for ID {booking_id}.",
+        }
+
+    async def post_call_report(self, payload: dict[str, object]) -> dict[str, object]:
+        self.last_posted_report = payload
+        return {
+            "detail": "Call event processed successfully.",
+            "external_call_id": payload.get("call_id"),
+            "status": "completed",
         }
 
 
@@ -454,10 +463,12 @@ def test_conversation_history_persists():
 # ── Test: session end clears data ────────────────────────────────
 
 def test_end_call_clears_session():
-    engine, _, _ = _make_engine()
+    engine, backend, _ = _make_engine()
     asyncio.run(engine.start_session("call-008"))
     asyncio.run(engine.end_call("call-008"))
     assert not asyncio.run(engine.has_session("call-008"))
+    assert backend.last_posted_report is not None
+    assert backend.last_posted_report["call_id"] == "call-008"
 
 
 def test_call_report_contains_booking_details():

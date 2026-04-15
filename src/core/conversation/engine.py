@@ -763,9 +763,21 @@ class ConversationEngine:
             )
             if record is not None:
                 record.report_payload = self._build_call_report_payload(session)
+                await self._push_call_report(record.report_payload)
 
         await self.sessions.delete(call_id)
         logger.bind(call_id=call_id).info("Session ended")
+
+    async def _push_call_report(self, report_payload: dict[str, Any]) -> None:
+        try:
+            response = await self.backend_client.post_call_report(report_payload)
+            logger.bind(call_id=report_payload.get("call_id")).info(
+                "Call report pushed",
+                external_call_id=response.get("external_call_id"),
+                status=response.get("status"),
+            )
+        except Exception:  # noqa: BLE001
+            logger.bind(call_id=report_payload.get("call_id")).exception("Failed to push call report")
 
     async def _get_or_create_session(self, call_id: str, agent_id: str | None = None) -> CallSession:
         existing = await self.sessions.get(call_id)
