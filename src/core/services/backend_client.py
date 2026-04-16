@@ -663,6 +663,7 @@ class BackendClient:
         return {
             "agent_id": str(payload.get("id") or payload.get("agent_id") or "default"),
             "business_name": business_name,
+            "business_category": business_type,
             "greeting": greeting,
             "intake_questions": self._default_questions_for_business(business_type),
             "language": "en",
@@ -1089,6 +1090,7 @@ class BackendClient:
         return {
             "agent_id": agent.agent_id,
             "business_name": agent.business_name,
+            "business_category": agent.business_category,
             "greeting": agent.greeting,
             "language": agent.language,
             "multilingual_enabled": agent.multilingual_enabled,

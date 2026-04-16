@@ -55,6 +55,24 @@ async def _handle_submit_booking(
     customer_name = args.get("customer_name", "")
     customer_phone = args.get("customer_phone", "")
 
+    session_state["interaction_type"] = "booking"
+    session_state["customer_details"] = {
+        **session_state.get("customer_details", {}),
+        **({"name": customer_name} if customer_name else {}),
+        **({"phone_number": customer_phone} if customer_phone else {}),
+        **({"location": location} if location else {}),
+    }
+    session_state["order_or_booking"] = {
+        **session_state.get("order_or_booking", {}),
+        "type": "booking",
+        "interaction_type": "booking",
+        **({"service_type": service_type} if service_type else {}),
+        **({"location": location} if location else {}),
+        **({"preferred_date": preferred_date} if preferred_date else {}),
+        **({"preferred_time": preferred_time} if preferred_time else {}),
+        "status": session_state.get("order_or_booking", {}).get("status", "pending"),
+    }
+
     # Validate coverage
     if agent_config.coverage_areas:
         location_lower = location.lower()

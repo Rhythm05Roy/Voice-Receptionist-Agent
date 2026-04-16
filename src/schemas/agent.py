@@ -217,6 +217,7 @@ class AgentTestVoiceResponse(BaseModel):
     session_id: str
     text: str
     audio_url: str | None = None
+    transcript: str | None = None
     action: str = "speak"
     is_active: bool = True
     transfer_number: str | None = None

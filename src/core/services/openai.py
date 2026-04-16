@@ -12,6 +12,7 @@ a set of **tools** (book, track, transfer, end_call) so it can:
 
 from __future__ import annotations
 
+import io
 import json
 import re
 from typing import Any, AsyncIterator, Sequence
@@ -398,3 +399,30 @@ class OpenAIClient:
             return await self.generate_reply(messages)
         except Exception:  # noqa: BLE001
             return text
+
+    async def transcribe_audio_bytes(
+        self,
+        audio_bytes: bytes,
+        *,
+        filename: str = "input.wav",
+        language: str = "en",
+        prompt: str | None = None,
+    ) -> str:
+        """Transcribe uploaded audio for direct voice testing."""
+        bio = io.BytesIO(audio_bytes)
+        bio.name = filename
+        try:
+            result = await self.client.audio.transcriptions.create(
+                model="gpt-4o-mini-transcribe",
+                file=bio,
+                language=language,
+                prompt=prompt
+                or (
+                    "This is a business phone call about bookings, reservations, tracking, "
+                    "pricing, policies, timings, and customer support."
+                ),
+            )
+            return (getattr(result, "text", "") or "").strip()
+        except OpenAIError as exc:
+            logger.exception("OpenAI transcription failed")
+            raise ConversationEngineError(str(exc)) from exc

@@ -1,15 +1,23 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.concurrency import run_in_threadpool
 from loguru import logger
 from pydantic import BaseModel
 
-from src.api.deps import get_backend_client, get_conversation_engine, get_elevenlabs_client, get_settings_dep, get_twilio_client
+from src.api.deps import (
+    get_backend_client,
+    get_conversation_engine,
+    get_elevenlabs_client,
+    get_llm_client,
+    get_settings_dep,
+    get_twilio_client,
+)
 from src.config import Settings
 from src.core.conversation.engine import ConversationEngine
 from src.core.services.backend_client import BackendClient
 from src.core.services.elevenlabs import ElevenLabsClient
+from src.core.services.openai import OpenAIClient
 from src.core.services.twilio_client import TwilioClient
 from src.schemas import (
     AgentBusinessQueryRequest,
@@ -526,6 +534,7 @@ async def test_voice_start(
         session_id=session_id,
         text=result["text"],
         audio_url=result.get("audio_url"),
+        transcript=None,
         action="speak",
         is_active=True,
         transfer_number=None,
@@ -602,6 +611,72 @@ async def test_voice_turn(
         session_id=payload.session_id,
         text=text_to_speak,
         audio_url=audio_url,
+        transcript=payload.text,
+        action=result.get("action", "speak"),
+        is_active=is_active,
+        transfer_number=result.get("transfer_number"),
+    )
+
+
+@router.post("/test-voice/audio-turn", response_model=AgentTestVoiceResponse)
+async def test_voice_audio_turn(
+    session_id: str = Form(...),
+    agent_id: str | None = Form(default=None),
+    audio_file: UploadFile = File(...),
+    engine: ConversationEngine = Depends(get_conversation_engine),
+    llm_client: OpenAIClient = Depends(get_llm_client),
+    elevenlabs_client: ElevenLabsClient = Depends(get_elevenlabs_client),
+) -> AgentTestVoiceResponse:
+    """Process uploaded audio like local_voice_conversation.py: STT -> engine -> TTS."""
+    if not await engine.has_session(session_id):
+        await engine.start_session(
+            call_id=session_id,
+            agent_id=agent_id,
+            is_test=True,
+        )
+
+    audio_bytes = await audio_file.read()
+    if not audio_bytes:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="audio_file is empty.")
+
+    transcript = await llm_client.transcribe_audio_bytes(
+        audio_bytes,
+        filename=audio_file.filename or "input.wav",
+        language="en",
+        prompt=(
+            "This is a business phone call about bookings, reservations, pricing, policies, "
+            "timings, customer support, and general business questions."
+        ),
+    )
+    if not transcript:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Could not transcribe audio.")
+
+    result = await engine.process_user_input(
+        call_id=session_id,
+        transcribed_text=transcript,
+        agent_id=agent_id,
+    )
+    is_active = result.get("action") != "hangup"
+
+    audio_url: str | None = None
+    text_to_speak = result.get("text_to_speak") or ""
+    voice_id: str | None = None
+    if hasattr(engine, "sessions") and hasattr(engine.sessions, "get"):
+        session = await engine.sessions.get(session_id)
+        if session is not None:
+            preferred_language = (session.preferred_language or session.agent_config.default_greeting_language or "en").lower()
+            voice_id = session.agent_config.language_voice_map.get(preferred_language)
+    if text_to_speak:
+        try:
+            audio_url = await elevenlabs_client.synthesize_text(text_to_speak, voice_id=voice_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("Direct test voice synthesis failed", session_id=session_id)
+
+    return AgentTestVoiceResponse(
+        session_id=session_id,
+        text=text_to_speak,
+        audio_url=audio_url,
+        transcript=transcript,
         action=result.get("action", "speak"),
         is_active=is_active,
         transfer_number=result.get("transfer_number"),

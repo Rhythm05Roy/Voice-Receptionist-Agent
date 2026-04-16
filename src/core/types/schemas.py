@@ -22,6 +22,8 @@ class DisqualificationRule(BaseModel):
     def normalize_rule(cls, value: Any) -> Any:
         if isinstance(value, dict):
             raw = dict(value)
+            if not raw.get("if_answer") and raw.get("disqualifying_value") is None and raw.get("message_to_caller") in (None, ""):
+                return None
             if raw.get("disqualifying_value") and not raw.get("if_answer"):
                 raw["if_answer"] = raw["disqualifying_value"]
             return raw
@@ -88,7 +90,15 @@ class IntakeQuestion(BaseModel):
                 raw["specific_categories"] = [str(item) for item in categories]
             rules = raw.get("disqualification_rules") or raw.get("disqualification")
             if rules is not None:
-                raw["disqualification_rules"] = list(rules)
+                if isinstance(rules, list):
+                    raw["disqualification_rules"] = [item for item in rules if item not in (None, {}, "")]
+                elif isinstance(rules, dict):
+                    if any(value not in (None, "") for value in rules.values()):
+                        raw["disqualification_rules"] = [rules]
+                    else:
+                        raw["disqualification_rules"] = []
+                else:
+                    raw["disqualification_rules"] = []
             if "is_required" in raw and "required" not in raw:
                 raw["required"] = raw["is_required"]
             return raw
@@ -127,6 +137,7 @@ class ServiceInfo(BaseModel):
 class AgentConfig(BaseModel):
     agent_id: str = Field(...)
     business_name: str = Field(default="Local Home Services Bahrain")
+    business_category: str = Field(default="")
     greeting: str = Field(default="Hello, how can I help you today?")
     intake_questions: list[IntakeQuestion] = Field(default_factory=list)
     language: str = Field(default="en")

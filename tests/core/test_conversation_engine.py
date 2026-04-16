@@ -27,6 +27,7 @@ class _Backend:
         return AgentConfig(
             agent_id="default",
             business_name=self.business_name,
+            business_category="home services",
             greeting=self.greeting,
             language="en",
             default_greeting_language="en",
@@ -482,10 +483,33 @@ def test_call_report_contains_booking_details():
     assert report is not None
     assert report["voice_id"] == 14
     assert report["language_id"] == 13
+    assert report["call_analytics"]["business_category"] == "home services"
     assert report["customer_details"]["phone_number"] == "+14165550101"
     assert report["order_or_booked_service"]["interaction_type"] == "booking"
     assert report["order_or_booked_service"]["service_type"] == "Home Deep Cleaning"
     assert report["call_analytics"]["called_number"] == "+15145550111"
+
+
+def test_call_report_keeps_incremental_customer_and_booking_details_before_submit():
+    engine, _, _ = _make_engine()
+    asyncio.run(engine.start_session("call-008c"))
+    asyncio.run(engine.process_user_input("call-008c", "I want to book a haircut at my place"))
+    asyncio.run(engine.process_user_input("call-008c", "My location is Bahrain and Riffa city"))
+    asyncio.run(engine.process_user_input("call-008c", "15th April 2026"))
+    asyncio.run(engine.process_user_input("call-008c", "9:30 PM"))
+    asyncio.run(engine.process_user_input("call-008c", "My name is Mr. Copper"))
+    asyncio.run(engine.process_user_input("call-008c", "My number is 01756552585"))
+
+    report = asyncio.run(engine.build_call_report("call-008c"))
+
+    assert report is not None
+    assert report["customer_details"]["name"] == "Mr. Copper"
+    assert report["customer_details"]["phone_number"] == "01756552585"
+    assert report["customer_details"]["location"] == "Bahrain and Riffa city"
+    assert report["order_or_booked_service"]["interaction_type"] == "booking"
+    assert report["order_or_booked_service"]["service_type"] == "At-Home Salon"
+    assert report["order_or_booked_service"]["preferred_date"] == "15th April 2026"
+    assert report["order_or_booked_service"]["preferred_time"] == "9:30 PM"
 
 
 def test_session_context_refreshes_after_ttl():

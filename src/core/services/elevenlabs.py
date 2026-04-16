@@ -27,10 +27,21 @@ class ElevenLabsClient:
         self.default_voice_id = default_voice_id
         self._voice_cache: set[str] = {default_voice_id}
 
+    @staticmethod
+    def _looks_like_placeholder_voice_id(voice_id: str) -> bool:
+        normalized = (voice_id or "").strip().lower()
+        return normalized.startswith("11labs-") or normalized.startswith("elevenlabs-")
+
     def _resolve_voice(self, voice_id: str | None) -> str:
-        if voice_id:
+        if voice_id and not self._looks_like_placeholder_voice_id(voice_id):
             self._voice_cache.add(voice_id)
             return voice_id
+        if voice_id and self._looks_like_placeholder_voice_id(voice_id):
+            logger.warning(
+                "Ignoring placeholder ElevenLabs voice id and using default voice",
+                requested_voice_id=voice_id,
+                fallback_voice_id=self.default_voice_id,
+            )
         return self.default_voice_id
 
     @retry(

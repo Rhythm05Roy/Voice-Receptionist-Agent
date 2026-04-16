@@ -31,3 +31,11 @@ def test_cached_tts_audio_endpoint(client):
     assert response.headers["content-type"].startswith("audio/mpeg")
 
     client.app.dependency_overrides.clear()
+
+
+def test_placeholder_voice_id_falls_back_to_default():
+    elevenlabs = ElevenLabsClient(client=None, api_key="test", default_voice_id="real-default-voice")
+
+    assert elevenlabs._resolve_voice("11labs-en-default") == "real-default-voice"
+    assert elevenlabs._resolve_voice("elevenlabs-ar-default") == "real-default-voice"
+    assert elevenlabs._resolve_voice("cNYrMw9glwJZXR8RwbuR") == "cNYrMw9glwJZXR8RwbuR"

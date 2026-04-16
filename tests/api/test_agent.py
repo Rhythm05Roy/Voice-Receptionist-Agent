@@ -47,6 +47,11 @@ class _FakeTTS:
         return f"data:audio/mpeg;base64,{text[:8] or 'AAA'}"
 
 
+class _FakeLLM:
+    async def transcribe_audio_bytes(self, audio_bytes: bytes, *, filename: str = "input.wav", language: str = "en", prompt: str | None = None) -> str:
+        return "I want to make a reservation"
+
+
 class _FakeBackend:
     def __init__(self):
         self.bindings = {}
@@ -334,6 +339,31 @@ def test_test_voice_turn_returns_tts_audio(client):
     assert body["text"] == "hello"
     assert body["audio_url"].startswith("data:audio/mpeg")
     assert body["action"] == "speak"
+    assert body["is_active"] is True
+
+    client.app.dependency_overrides.clear()
+
+
+def test_test_voice_audio_turn_runs_stt_and_tts(client):
+    deps_override = {
+        deps.get_conversation_engine: lambda: _FakeEngine(),
+        deps.get_elevenlabs_client: lambda: _FakeTTS(),
+        deps.get_llm_client: lambda: _FakeLLM(),
+    }
+    client.app.dependency_overrides.update(deps_override)
+
+    response = client.post(
+        "/api/v1/agent/test-voice/audio-turn",
+        data={"session_id": "voice-test-audio-1", "agent_id": "agent-1"},
+        files={"audio_file": ("input.wav", b"RIFF....", "audio/wav")},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["session_id"] == "voice-test-audio-1"
+    assert body["transcript"] == "I want to make a reservation"
+    assert body["text"] == "hello"
+    assert body["audio_url"].startswith("data:audio/mpeg")
     assert body["is_active"] is True
 
     client.app.dependency_overrides.clear()

@@ -210,6 +210,7 @@ class ConversationEngine:
         session.add_message("user", text)
         self._update_active_intent_from_user_text(session, text)
         await self._update_language_preference(session, text)
+        self._capture_incremental_details(session, text)
 
         logger.bind(call_id=call_id).debug(
             "Processing turn",
@@ -281,6 +282,201 @@ class ConversationEngine:
         )
 
         return response
+
+    def _capture_incremental_details(self, session: CallSession, user_text: str) -> None:
+        text = (user_text or "").strip()
+        if not text:
+            return
+
+        customer_details = session.state.setdefault("customer_details", {})
+        order_or_booking = session.state.setdefault("order_or_booking", {})
+        lowered = text.lower()
+        last_assistant_message = next(
+            (
+                item.get("content", "")
+                for item in reversed(session.conversation_history[:-1])
+                if item.get("role") == "assistant" and item.get("content")
+            ),
+            "",
+        ).lower()
+
+        if session.preferred_language:
+            customer_details.setdefault("language", session.preferred_language)
+
+        extracted_name = self._extract_customer_name(text, last_assistant_message)
+        if extracted_name:
+            customer_details["name"] = extracted_name
+
+        extracted_phone = self._extract_customer_phone(text, last_assistant_message)
+        if extracted_phone:
+            customer_details["phone_number"] = extracted_phone
+
+        extracted_location = self._extract_location(text, last_assistant_message)
+        if extracted_location:
+            customer_details["location"] = extracted_location
+            order_or_booking.setdefault("interaction_type", "booking")
+            order_or_booking["location"] = extracted_location
+
+        extracted_time = self._extract_preferred_time(text, last_assistant_message)
+        if extracted_time:
+            order_or_booking.setdefault("interaction_type", "booking")
+            order_or_booking["preferred_time"] = extracted_time
+
+        extracted_date = self._extract_preferred_date(text, last_assistant_message)
+        if extracted_date:
+            order_or_booking.setdefault("interaction_type", "booking")
+            order_or_booking["preferred_date"] = extracted_date
+
+        matched_service = self._match_service_type(session, text)
+        if matched_service:
+            order_or_booking.setdefault("interaction_type", "booking")
+            order_or_booking["service_type"] = matched_service
+
+        if order_or_booking.get("interaction_type") == "booking":
+            order_or_booking.setdefault("type", "booking")
+
+    @staticmethod
+    def _extract_customer_name(text: str, last_assistant_message: str) -> str | None:
+        name_patterns = [
+            r"\bmy name is\s+([A-Za-z][A-Za-z .'-]{1,60})$",
+            r"\bi am\s+([A-Za-z][A-Za-z .'-]{1,60})$",
+            r"\bi'm\s+([A-Za-z][A-Za-z .'-]{1,60})$",
+        ]
+        for pattern in name_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1).strip(" .")
+
+        if any(token in last_assistant_message for token in {"your name", "share your name", "get your name"}):
+            simple = re.sub(r"^[^A-Za-z]+", "", text).strip(" .")
+            if re.fullmatch(r"[A-Za-z][A-Za-z .'-]{1,60}", simple):
+                return simple
+
+        return None
+
+    @staticmethod
+    def _extract_customer_phone(text: str, last_assistant_message: str) -> str | None:
+        if not (
+            any(token in text.lower() for token in {"phone", "number", "mobile", "contact"})
+            or any(token in last_assistant_message for token in {"phone number", "contact number", "share your phone"})
+        ):
+            return None
+
+        digits = re.findall(r"\+?\d[\d ()-]{6,}\d", text)
+        if not digits:
+            return None
+        phone = re.sub(r"[^\d+]", "", digits[0])
+        return phone if len(re.sub(r"\D", "", phone)) >= 7 else None
+
+    @staticmethod
+    def _extract_location(text: str, last_assistant_message: str) -> str | None:
+        location_patterns = [
+            r"\bmy location is\s+(.+)$",
+            r"\bi am located in\s+(.+)$",
+            r"\bi'm located in\s+(.+)$",
+            r"\bi am in\s+(.+)$",
+            r"\bi'm in\s+(.+)$",
+            r"\bwe are in\s+(.+)$",
+            r"\blocated in\s+(.+)$",
+            r"\bmy city is\s+(.+)$",
+            r"\bmy area is\s+(.+)$",
+        ]
+        for pattern in location_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1).strip(" .")
+
+        if any(token in last_assistant_message for token in {"where are you located", "what is your location", "which area are you located"}):
+            cleaned = text.strip(" .")
+            if len(cleaned) >= 2:
+                return cleaned
+
+        return None
+
+    @staticmethod
+    def _extract_preferred_time(text: str, last_assistant_message: str) -> str | None:
+        if not (
+            any(token in text.lower() for token in {"am", "pm", "morning", "afternoon", "evening", "night"})
+            or any(token in last_assistant_message for token in {"what time", "preferred time", "time works best"})
+        ):
+            return None
+
+        time_match = re.search(
+            r"\b(\d{1,2}(?::\d{2})?\s?(?:a\.?m\.?|p\.?m\.?)|\d{1,2}(?::\d{2})?\s?(?:am|pm)|morning|afternoon|evening|night)\b",
+            text,
+            re.IGNORECASE,
+        )
+        if time_match:
+            return time_match.group(1).strip()
+        return None
+
+    @staticmethod
+    def _extract_preferred_date(text: str, last_assistant_message: str) -> str | None:
+        lowered = text.lower()
+        has_date_words = any(
+            token in lowered
+            for token in {
+                "today", "tomorrow", "april", "may", "june", "july", "august",
+                "september", "october", "november", "december", "january",
+                "february", "march",
+            }
+        )
+        has_day_number = bool(re.search(r"\b\d{1,2}(st|nd|rd|th)?\b", text, re.IGNORECASE))
+        looks_like_time_only = bool(
+            re.search(r"\b\d{1,2}:\d{2}\s?(?:a\.?m\.?|p\.?m\.?|am|pm)\b", text, re.IGNORECASE)
+        )
+        if not (
+            has_date_words
+            or (has_day_number and not looks_like_time_only)
+            or any(token in last_assistant_message for token in {"what date", "preferred date", "which date"})
+        ):
+            return None
+
+        return text.strip(" .")
+
+    @staticmethod
+    def _normalize_text(value: str) -> str:
+        return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+    def _match_service_type(self, session: CallSession, text: str) -> str | None:
+        catalog = list(session.agent_config.service_catalog or [])
+        if not catalog:
+            return None
+
+        normalized_text = self._normalize_text(text)
+        if not normalized_text:
+            return None
+        text_tokens = normalized_text.split()
+
+        best_match: str | None = None
+        best_score = 0
+        for service in catalog:
+            name = getattr(service, "name", "") or ""
+            normalized_name = self._normalize_text(name)
+            if not normalized_name:
+                continue
+
+            score = 0
+            if normalized_name in normalized_text:
+                score = max(score, len(normalized_name.split()) + 5)
+
+            for keyword in getattr(service, "keywords", []) or []:
+                normalized_keyword = self._normalize_text(keyword)
+                if not normalized_keyword:
+                    continue
+                keyword_tokens = normalized_keyword.split()
+                if all(token in text_tokens for token in keyword_tokens):
+                    score = max(score, len(keyword_tokens) + 3)
+
+            service_tokens = set(normalized_name.split())
+            overlap = len(service_tokens & set(text_tokens))
+            score = max(score, overlap)
+
+            if score > best_score:
+                best_score = score
+                best_match = name
+
+        return best_match if best_score >= 2 else None
 
     async def _update_language_preference(self, session: CallSession, user_text: str) -> None:
         text = (user_text or "").strip()
@@ -826,6 +1022,7 @@ class ConversationEngine:
             "call_analytics": {
                 "call_id": record.call_id,
                 "agent_id": record.agent_id,
+                "business_category": None,
                 "duration_seconds": round(record.duration_seconds, 2),
                 "turn_count": record.turn_count,
                 "outcome": outcome,
@@ -894,6 +1091,7 @@ class ConversationEngine:
                 "call_id": session.call_id,
                 "agent_id": session.agent_id,
                 "business_name": session.agent_config.business_name,
+                "business_category": session.agent_config.business_category or None,
                 "caller_number": caller_number,
                 "called_number": called_number,
                 "started_at": started_at,
