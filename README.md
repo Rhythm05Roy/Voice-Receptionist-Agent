@@ -15,7 +15,7 @@ FastAPI + ConversationEngine
   │   ├─ BackendClient  (agent config + booking)
   │   ├─ OpenAI/Anthropic (LLM replies)
   │   ├─ ElevenLabs (TTS data URLs)
-  │   └─ AssemblyAI stub (real-time STT hook)
+  │   └─ Whisper stub (real-time STT hook)
   ▼
 Twilio TwiML response (<Gather> / <Dial> / <Hangup>)
 ```
@@ -99,8 +99,6 @@ curl -X POST http://localhost:8000/api/v1/telephony/webhook/inbound \
 - ELEVENLABS_API_KEY / ELEVENLABS_VOICE_ID
 - TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_PHONE_NUMBER
 - PUBLIC_BASE_URL / TWILIO_VALIDATE_SIGNATURE (recommended for production)
-- ASSEMBLYAI_API_KEY
-- VONAGE_API_KEY / VONAGE_API_SECRET / VONAGE_APPLICATION_ID / VONAGE_PRIVATE_KEY (optional legacy)
 - REQUEST_TIMEOUT, LOG_LEVEL, ENVIRONMENT
 - REDIS_URL (optional future for session store)
 
